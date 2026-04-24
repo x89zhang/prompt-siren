@@ -56,6 +56,7 @@ prompt-siren-build-images = "prompt_siren.build_images:main"
 
 [project.entry-points."prompt_siren.agents"]
 plain = "prompt_siren.agents.plain:create_plain_agent"
+mini_swe = "prompt_siren.agents.mini_swe:create_mini_swe_agent"
 
 [project.entry-points."prompt_siren.attacks"]
 template_string = "prompt_siren.attacks.template_string_attack:create_template_string_attack"

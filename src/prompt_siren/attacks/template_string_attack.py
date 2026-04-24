@@ -40,6 +40,10 @@ def _get_model_name(model_name: str | KnownModelName) -> str:
         return "ChatGPT"
     if "gemini" in model_name:
         return "Gemini"
+    if "qwen" in model_name:
+        return "Qwen"
+    if "llama" in model_name:
+        return "Llama"
     raise UnknownModelError(f"Unknown model error: '{model_name}'")
 
 
