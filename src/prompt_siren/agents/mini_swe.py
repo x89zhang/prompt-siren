@@ -40,7 +40,13 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import assert_never
 
 from ..environments.abstract import AbstractEnvironment
-from ..types import InjectableUserContent, InjectionAttack
+from ..tools_utils import run_tool_raw
+from ..types import (
+    InjectableRetryPromptPart,
+    InjectableToolReturnPart,
+    InjectableUserContent,
+    InjectionAttack,
+)
 from .abstract import AbstractAgent
 from .states import (
     EndState,
@@ -98,6 +104,13 @@ class MiniSweAgentConfig(BaseModel):
         default=0,
         description=(
             "Maximum model calls for this adapter. 0 means use mini config/no adapter limit."
+        ),
+    )
+    clone_environment_for_tools: bool = Field(
+        default=False,
+        description=(
+            "Clone the Docker environment before each tool execution. The default avoids "
+            "Docker network cloning issues and is sufficient for non-rollback attacks."
         ),
     )
 
@@ -423,7 +436,7 @@ class MiniSweAgent(AbstractAgent):
                     _is_submit_command(str(part.args_as_dict().get("command", "")))
                     for part in tool_call_parts
                 )
-                results_parts, new_run_ctx = await handle_tool_calls(
+                results_parts, new_run_ctx = await self._handle_tool_calls(
                     run_ctx,
                     environment,
                     tool_call_parts,
@@ -431,7 +444,19 @@ class MiniSweAgent(AbstractAgent):
                 )
                 if submit_after_tool:
                     final_request = ModelRequest(
-                        [part for part in results_parts if isinstance(part, ModelRequestPart)]
+                        [
+                            part
+                            for part in results_parts
+                            if isinstance(
+                                part,
+                                (
+                                    SystemPromptPart,
+                                    UserPromptPart,
+                                    ToolReturnPart,
+                                    RetryPromptPart,
+                                ),
+                            )
+                        ]
                     )
                     return EndState(
                         self._append_single_message(new_run_ctx, final_request),
@@ -459,6 +484,51 @@ class MiniSweAgent(AbstractAgent):
             case _:
                 assert_never(current_state)
 
+    async def _handle_tool_calls(
+        self,
+        run_ctx: RunContext[EnvStateT],
+        environment: AbstractEnvironment[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+        tool_call_parts: Sequence[ToolCallPart],
+        toolsets: Sequence[AbstractToolset[EnvStateT]],
+    ) -> tuple[
+        list[ModelRequestPart | InjectableToolReturnPart | InjectableRetryPromptPart],
+        RunContext[EnvStateT],
+    ]:
+        if self.config.clone_environment_for_tools:
+            return await handle_tool_calls(run_ctx, environment, tool_call_parts, toolsets)
+
+        results_parts: list[
+            ModelRequestPart | InjectableToolReturnPart | InjectableRetryPromptPart
+        ] = []
+        for tool_call in tool_call_parts:
+            raw_output = await run_tool_raw(run_ctx, toolsets, tool_call)
+            if isinstance(raw_output, RetryPromptPart | InjectableRetryPromptPart):
+                results_parts.append(raw_output)
+                continue
+
+            vector_ids = await environment.get_injectable_ids(raw_output)
+            if not vector_ids:
+                rendered = await environment.render(raw_output)
+                results_parts.append(
+                    ToolReturnPart(
+                        tool_call.tool_name,
+                        rendered,
+                        tool_call_id=tool_call.tool_call_id,
+                    )
+                )
+                continue
+
+            results_parts.append(
+                InjectableToolReturnPart(
+                    tool_name=tool_call.tool_name,
+                    content=raw_output,
+                    tool_call_id=tool_call.tool_call_id,
+                    default=await environment.get_default_for_injection_vectors(vector_ids),
+                )
+            )
+
+        return results_parts, run_ctx
+
     def _mini_response_to_model_response(self, mini_response: dict[str, Any]) -> ModelResponse:
         parts: list[Any] = []
         content = mini_response.get("content") or ""
@@ -475,13 +545,14 @@ class MiniSweAgent(AbstractAgent):
         return ModelResponse(parts=parts)
 
     def _to_mini_messages(self, messages: Sequence[ModelMessage]) -> list[dict[str, Any]]:
+        system_contents: list[str] = []
         mini_messages: list[dict[str, Any]] = []
         for message in messages:
             match message:
                 case ModelRequest(parts=parts):
                     for part in parts:
                         if isinstance(part, SystemPromptPart):
-                            mini_messages.append({"role": "system", "content": str(part.content)})
+                            system_contents.append(str(part.content))
                         elif isinstance(part, UserPromptPart):
                             mini_messages.append({"role": "user", "content": str(part.content)})
                         elif isinstance(part, ToolReturnPart | RetryPromptPart):
@@ -498,6 +569,11 @@ class MiniSweAgent(AbstractAgent):
                         )
                 case _:
                     continue
+        if system_contents:
+            return [
+                {"role": "system", "content": "\n\n".join(system_contents)},
+                *mini_messages,
+            ]
         return mini_messages
 
     def _format_observation(
