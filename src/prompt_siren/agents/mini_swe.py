@@ -36,7 +36,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import AbstractToolset
-from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 from typing_extensions import assert_never
 
 from ..environments.abstract import AbstractEnvironment
@@ -159,6 +159,25 @@ def _part_text(part: ModelRequestPart) -> str | None:
             return str(content)
         case _:
             return None
+
+
+def _first_int(mapping: dict[str, Any], keys: Sequence[str]) -> int:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _nested_int(mapping: dict[str, Any], parent: str, key: str) -> int:
+    value = mapping.get(parent)
+    if not isinstance(value, dict):
+        return 0
+    return _first_int(value, [key])
 
 
 @dataclass(frozen=True)
@@ -542,7 +561,61 @@ class MiniSweAgent(AbstractAgent):
 
         if not parts:
             parts.append(TextPart(""))
-        return ModelResponse(parts=parts)
+        raw_response = self._raw_mini_response(mini_response)
+        return ModelResponse(
+            parts=parts,
+            usage=self._request_usage_from_mini_response(mini_response),
+            model_name=str(raw_response.get("model")) if raw_response.get("model") else None,
+        )
+
+    @staticmethod
+    def _raw_mini_response(mini_response: dict[str, Any]) -> dict[str, Any]:
+        extra = mini_response.get("extra", {})
+        if not isinstance(extra, dict):
+            return {}
+        response = extra.get("response")
+        return response if isinstance(response, dict) else {}
+
+    @classmethod
+    def _request_usage_from_mini_response(cls, mini_response: dict[str, Any]) -> RequestUsage:
+        raw_response = cls._raw_mini_response(mini_response)
+        usage = raw_response.get("usage")
+        if not isinstance(usage, dict):
+            usage = mini_response.get("usage")
+        if not isinstance(usage, dict):
+            return RequestUsage()
+
+        details: dict[str, int] = {}
+        for key, value in usage.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if key not in {"prompt_tokens", "completion_tokens", "input_tokens", "output_tokens"}:
+                details[key] = value
+
+        prompt_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_details, dict):
+            for key, value in prompt_details.items():
+                if isinstance(value, bool) or not isinstance(value, int):
+                    continue
+                details[f"prompt_tokens_details.{key}"] = value
+
+        completion_details = usage.get("completion_tokens_details")
+        if isinstance(completion_details, dict):
+            for key, value in completion_details.items():
+                if isinstance(value, bool) or not isinstance(value, int):
+                    continue
+                details[f"completion_tokens_details.{key}"] = value
+
+        return RequestUsage(
+            input_tokens=_first_int(usage, ["input_tokens", "request_tokens", "prompt_tokens"]),
+            output_tokens=_first_int(
+                usage, ["output_tokens", "response_tokens", "completion_tokens"]
+            ),
+            cache_read_tokens=_nested_int(usage, "prompt_tokens_details", "cached_tokens"),
+            input_audio_tokens=_nested_int(usage, "prompt_tokens_details", "audio_tokens"),
+            output_audio_tokens=_nested_int(usage, "completion_tokens_details", "audio_tokens"),
+            details=details,
+        )
 
     def _to_mini_messages(self, messages: Sequence[ModelMessage]) -> list[dict[str, Any]]:
         system_contents: list[str] = []
@@ -675,10 +748,12 @@ class MiniSweAgent(AbstractAgent):
         model_request: ModelRequest,
         model_response: ModelResponse,
     ) -> RunContext[EnvStateT]:
+        usage = run_ctx.usage + model_response.usage
+        usage.requests += 1
         return RunContext(
             deps=run_ctx.deps,
             model=run_ctx.model,
-            usage=run_ctx.usage,
+            usage=usage,
             messages=[*run_ctx.messages, model_request, model_response],
         )
 
