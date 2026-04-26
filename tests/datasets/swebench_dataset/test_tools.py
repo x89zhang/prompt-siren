@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock
 
 import pytest
+from prompt_siren.datasets.swebench_dataset.constants import TESTBED_PATH
 from prompt_siren.datasets.swebench_dataset.tools import (
     _truncate_output,
     bash,
@@ -36,6 +37,7 @@ class MockSandboxManager:
     """Mock sandbox manager for testing."""
 
     exec_fn: AsyncMock
+    last_cwd: str | None = None
 
     @asynccontextmanager
     async def setup_batch(self, task_setups: Sequence) -> AsyncIterator[None]:
@@ -68,6 +70,7 @@ class MockSandboxManager:
         shell_path: object | None = None,
     ) -> ExecOutput:
         """Delegate to the mock exec function."""
+        self.last_cwd = cwd
         return await self.exec_fn(cmd, timeout)
 
 
@@ -107,6 +110,18 @@ class TestBash:
 
         result = await bash(ctx, "echo 'hello world'")
         assert result == "hello world"
+
+    @pytest.mark.anyio
+    async def test_bash_defaults_to_testbed_cwd(self, mock_context):
+        """Test bash commands run from the SWE-bench repository directory by default."""
+        mock_exec = AsyncMock(
+            return_value=create_exec_output(stdout="hello world", stderr=None, exit_code=0)
+        )
+        ctx = mock_context(mock_exec)
+
+        await bash(ctx, "pwd")
+
+        assert ctx.deps.sandbox_manager.last_cwd == TESTBED_PATH
 
     @pytest.mark.anyio
     async def test_bash_with_stderr(self, mock_context):

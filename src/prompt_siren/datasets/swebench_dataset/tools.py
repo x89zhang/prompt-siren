@@ -8,6 +8,7 @@ from pydantic_ai import RunContext
 
 from ...environments.bash_env import BashEnvState
 from ...sandbox_managers.abstract import ExecOutput
+from .constants import TESTBED_PATH
 
 
 class ExecFn(Protocol):
@@ -36,7 +37,7 @@ class ToolPermissionError(ToolExecutionError):
 
 def _create_exec_fn(
     run_ctx: RunContext[BashEnvState],
-    cwd: str = "/",
+    cwd: str = TESTBED_PATH,
     user: str | None = None,
     env: dict[str, str] | None = None,
     shell_path: Path | None = None,

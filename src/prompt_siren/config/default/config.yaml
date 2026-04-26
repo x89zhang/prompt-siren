@@ -65,6 +65,7 @@ task_ids: null # Task IDs to run (null = all tasks appropriate for mode)
 # =============================================================================
 output:
   jobs_dir: "jobs" # Directory for job outputs
+  n_runs_per_task: 1 # Number of runs to collect per selected task/couple
 
 # =============================================================================
 # OBSERVABILITY & TELEMETRY

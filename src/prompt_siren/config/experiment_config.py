@@ -58,6 +58,11 @@ class OutputConfig(BaseModel):
     job_name: str | None = Field(
         default=None, description="Custom job name (auto-generated if None)"
     )
+    n_runs_per_task: int = Field(
+        default=1,
+        ge=1,
+        description="Number of runs to collect for each selected task or task couple",
+    )
 
 
 class TelemetryConfig(BaseModel):

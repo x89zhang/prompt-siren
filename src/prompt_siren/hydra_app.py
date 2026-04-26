@@ -2,6 +2,7 @@
 """Main Hydra application for the Siren."""
 
 import asyncio
+from typing import Protocol, TypeVar
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -25,6 +26,29 @@ from .run import run_single_tasks_without_attack, run_task_couples_with_attack
 from .telemetry import setup_telemetry
 from .telemetry.formatted_span import formatted_span
 from .types import ExecutionMode
+
+
+class _RunnableEntity(Protocol):
+    id: str
+
+
+RunnableEntityT = TypeVar("RunnableEntityT", bound=_RunnableEntity)
+
+
+def _expand_entities_for_required_runs(
+    job: Job,
+    selected_entities: list[RunnableEntityT],
+) -> list[RunnableEntityT]:
+    """Repeat selected entities until each reaches the job's n_runs_per_task target."""
+    run_counts = job.persistence.get_run_counts()
+    n_required = job.job_config.n_runs_per_task
+    expanded_entities: list[RunnableEntityT] = []
+
+    for entity in selected_entities:
+        n_missing = max(0, n_required - run_counts.get(entity.id, 0))
+        expanded_entities.extend([entity] * n_missing)
+
+    return expanded_entities
 
 
 def validate_config(cfg: DictConfig, execution_mode: ExecutionMode) -> ExperimentConfig:
@@ -161,6 +185,7 @@ async def run_benign_experiment(
             jobs_dir=experiment_config.output.jobs_dir,
             job_name=experiment_config.output.job_name,
             agent_name=agent.get_agent_name(),
+            n_runs_per_task=experiment_config.output.n_runs_per_task,
         )
         print(f"Job: {job.job_config.job_name}")
         print(f"Job directory: {job.job_dir}")
@@ -168,12 +193,10 @@ async def run_benign_experiment(
         print(f"Resuming job: {job.job_config.job_name}")
         print(f"Job directory: {job.job_dir}")
 
-        # Filter out tasks that already have enough runs
-        task_ids_needing_runs = set(job.filter_tasks_needing_runs([t.id for t in selected_tasks]))
-        selected_tasks = [t for t in selected_tasks if t.id in task_ids_needing_runs]
-        if not selected_tasks:
-            print("All tasks have completed the required number of runs.")
-            return {}
+    selected_tasks = _expand_entities_for_required_runs(job, selected_tasks)
+    if not selected_tasks:
+        print("All tasks have completed the required number of runs.")
+        return {}
 
     # Run benign experiment
     with formatted_span(
@@ -256,6 +279,7 @@ async def run_attack_experiment(
             jobs_dir=experiment_config.output.jobs_dir,
             job_name=experiment_config.output.job_name,
             agent_name=agent.get_agent_name(),
+            n_runs_per_task=experiment_config.output.n_runs_per_task,
         )
         print(f"Job: {job.job_config.job_name}")
         print(f"Job directory: {job.job_dir}")
@@ -263,14 +287,10 @@ async def run_attack_experiment(
         print(f"Resuming job: {job.job_config.job_name}")
         print(f"Job directory: {job.job_dir}")
 
-        # Filter out couples that already have enough runs
-        couple_ids_needing_runs = set(
-            job.filter_tasks_needing_runs([c.id for c in selected_couples])
-        )
-        selected_couples = [c for c in selected_couples if c.id in couple_ids_needing_runs]
-        if not selected_couples:
-            print("All task couples have completed the required number of runs.")
-            return {}
+    selected_couples = _expand_entities_for_required_runs(job, selected_couples)
+    if not selected_couples:
+        print("All task couples have completed the required number of runs.")
+        return {}
 
     # Run attack experiment
     with formatted_span(
