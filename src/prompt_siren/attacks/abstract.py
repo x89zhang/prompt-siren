@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import abc
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import ClassVar, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -10,7 +10,7 @@ from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import UsageLimits
 
 from ..agents.abstract import AbstractAgent
-from ..agents.states import EndState
+from ..agents.states import EndState, ExecutionState
 from ..environments.abstract import AbstractEnvironment
 from ..tasks import BenignTask, MaliciousTask
 from ..types import InjectionAttack, InjectionAttacksDict
@@ -45,6 +45,14 @@ class AbstractAttack(Protocol[EnvStateT, RawOutputT, FinalOutputT, InjectionAtta
         malicious_task: MaliciousTask[EnvStateT],
         usage_limits: UsageLimits,
         instrument: InstrumentationSettings | bool | None = None,
+        state_callback: Callable[
+            [
+                ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+                Mapping[str, InjectionAttackT] | None,
+            ],
+            Awaitable[None],
+        ]
+        | None = None,
     ) -> tuple[
         EndState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
         InjectionAttacksDict[InjectionAttackT],

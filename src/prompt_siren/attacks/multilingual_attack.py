@@ -1,5 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar, Generic, TypeVar
 
@@ -10,7 +10,7 @@ from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import UsageLimits
 
 from ..agents.abstract import AbstractAgent
-from ..agents.states import EndState
+from ..agents.states import EndState, ExecutionState
 from ..environments.abstract import AbstractEnvironment
 from ..providers import infer_model
 from ..tasks import BenignTask, MaliciousTask
@@ -141,6 +141,14 @@ class MultilingualAttack(
         malicious_task: MaliciousTask[EnvStateT],
         usage_limits: UsageLimits,
         instrument: InstrumentationSettings | bool | None = None,
+        state_callback: Callable[
+            [
+                ExecutionState[EnvStateT, str, str, StrContentAttack],
+                Mapping[str, StrContentAttack] | None,
+            ],
+            Awaitable[None],
+        ]
+        | None = None,
     ) -> tuple[
         EndState[EnvStateT, str, str, StrContentAttack],
         InjectionAttacksDict[StrContentAttack],
@@ -171,6 +179,7 @@ class MultilingualAttack(
                 toolsets=toolsets,
                 usage_limits=usage_limits,
                 instrument=instrument,
+                state_callback=state_callback,
             )
             if isinstance(state, EndState):
                 return state, attacks
@@ -193,6 +202,8 @@ class MultilingualAttack(
                 attacks=attacks,
                 instrument=instrument,
             )
+            if state_callback is not None:
+                await state_callback(state, attacks)
 
         return state, attacks
 

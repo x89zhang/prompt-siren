@@ -1,5 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar, Generic, TypeVar
 
@@ -18,6 +18,7 @@ from pydantic_ai.messages import ModelMessage
 from ..agents.abstract import AbstractAgent
 from ..agents.states import (
     EndState,
+    ExecutionState,
     InjectableModelRequestState,
     ModelRequestState,
     ModelResponseState,
@@ -244,6 +245,14 @@ class MiniGoatAttack(
         malicious_task: MaliciousTask[EnvStateT],
         usage_limits: UsageLimits,
         instrument: InstrumentationSettings | bool | None = None,
+        state_callback: Callable[
+            [
+                ExecutionState[EnvStateT, str, str, StrContentAttack],
+                Mapping[str, StrContentAttack] | None,
+            ],
+            Awaitable[None],
+        ]
+        | None = None,
     ) -> tuple[
         EndState[EnvStateT, str, str, StrContentAttack],
         InjectionAttacksDict[StrContentAttack],
@@ -265,6 +274,7 @@ class MiniGoatAttack(
                 toolsets=toolsets,
                 usage_limits=usage_limits,
                 instrument=instrument,
+                state_callback=state_callback,
             )
             if isinstance(state, EndState):
                 return state, attacks
@@ -329,6 +339,8 @@ class MiniGoatAttack(
                 attacks=attacks,
                 instrument=instrument,
             )
+            if state_callback is not None:
+                await state_callback(state, attacks)
 
         return state, attacks
 

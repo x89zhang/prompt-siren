@@ -40,6 +40,7 @@ def _create_exec_fn(
     user: str | None = None,
     env: dict[str, str] | None = None,
     shell_path: Path | None = None,
+    default_timeout: int = 60,
 ) -> ExecFn:
     """Create an exec function from a RunContext with specified execution parameters.
 
@@ -68,8 +69,7 @@ def _create_exec_fn(
     async def exec_fn(cmd: str | list[str], timeout: int | None = None) -> ExecOutput:
         sandbox_manager = run_ctx.deps.sandbox_manager
         container_id = run_ctx.deps.agent_container_id
-        # Default timeout of 60 seconds aligned with mini-SWE-agent
-        effective_timeout = timeout if timeout is not None else 60
+        effective_timeout = timeout if timeout is not None else default_timeout
         return await sandbox_manager.exec(
             container_id,
             cmd,
@@ -141,6 +141,7 @@ async def bash(
     run_ctx: RunContext[BashEnvState],
     command: str | list[str],
     timeout: int | None = None,
+    default_timeout: int = 60,
 ) -> str:
     """Execute a bash command in the container.
 
@@ -153,11 +154,12 @@ async def bash(
         run_ctx: The RunContext with sandbox manager and container
         command: Command to execute (string or list of arguments)
         timeout: Optional timeout in seconds
+        default_timeout: Timeout in seconds to use when timeout is not specified
 
     Returns:
         Combined stdout/stderr output, truncated if over 10,000 characters
     """
-    exec_fn = _create_exec_fn(run_ctx)
+    exec_fn = _create_exec_fn(run_ctx, default_timeout=default_timeout)
     output = await exec_fn(command, timeout=timeout)
     combined = output.combined or ""
     return _truncate_output(combined)

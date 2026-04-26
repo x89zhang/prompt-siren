@@ -1,7 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import asyncio
+import inspect
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import assert_never
 
 from .agents.abstract import AbstractAgent
+from .agents.states import EndState, ExecutionState
 from .attacks.abstract import AbstractAttack
 from .environments.abstract import AbstractEnvironment
 from .job import JobPersistence
@@ -169,6 +171,19 @@ def _setup_history(system_prompt: str | None) -> list[ModelMessage]:
     return []
 
 
+def _state_run_context(
+    state: ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+) -> RunContext[EnvStateT]:
+    return state.run_ctx
+
+
+def _supports_state_callback(attack: AbstractAttack) -> bool:
+    params = inspect.signature(attack.attack).parameters
+    return "state_callback" in params or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
+    )
+
+
 async def _run_single_task_without_attack(
     task: Task[EnvStateT],
     agent: AbstractAgent,
@@ -185,6 +200,9 @@ async def _run_single_task_without_attack(
     started_at = datetime.now()
     agent_name = agent.get_agent_name()
     message_history = _setup_history(system_prompt)
+    run_id: str | None = None
+    partial_messages: list[ModelMessage] = []
+    partial_usage = RunUsage()
 
     async with (
         concurrency_limiter,
@@ -213,17 +231,50 @@ async def _run_single_task_without_attack(
                     assert_never(task)
 
             try:
-                # Execute task
-                result_ctx = await agent.run(
-                    environment,
-                    env_state,
-                    prompt,
-                    message_history=message_history,
-                    toolsets=toolsets,
-                    attacks=None,
-                    usage_limits=usage_limits,
-                    instrument=instrument,
-                )
+                if persistence:
+                    run_id, _ = persistence.create_task_run_dir(task.id)
+
+                    # Execute task, persisting the latest state after each transition.
+                    end_state = None
+                    async for state in agent.iter(
+                        environment,
+                        env_state,
+                        prompt,
+                        message_history=message_history,
+                        toolsets=toolsets,
+                        attacks=None,
+                        usage_limits=usage_limits,
+                        instrument=instrument,
+                    ):
+                        result_ctx = _state_run_context(state)
+                        partial_messages = list(result_ctx.messages)
+                        partial_usage = result_ctx.usage
+                        persistence.save_partial_execution(
+                            task_id=task.id,
+                            run_id=run_id,
+                            messages=partial_messages,
+                            usage=partial_usage,
+                            task_span=task_span,
+                        )
+                        if isinstance(state, EndState):
+                            end_state = state
+                            break
+
+                    if not isinstance(end_state, EndState):
+                        raise RuntimeError("Agent iteration completed without reaching EndState")
+
+                    result_ctx = end_state.run_ctx
+                else:
+                    result_ctx = await agent.run(
+                        environment,
+                        env_state,
+                        prompt,
+                        message_history=message_history,
+                        toolsets=toolsets,
+                        attacks=None,
+                        usage_limits=usage_limits,
+                        instrument=instrument,
+                    )
 
                 # Evaluate
                 task_result = TaskResult(
@@ -242,6 +293,7 @@ async def _run_single_task_without_attack(
                         usage=result_ctx.usage,
                         task_span=task_span,
                         started_at=started_at,
+                        run_id=run_id,
                     )
 
                 return evaluation
@@ -254,11 +306,12 @@ async def _run_single_task_without_attack(
                     persistence.save_task_run(
                         task=task,
                         evaluation=EvaluationResult(task_id=task.id, results={}),
-                        messages=[],
-                        usage=RunUsage(),
+                        messages=partial_messages,
+                        usage=partial_usage,
                         task_span=task_span,
                         started_at=started_at,
                         exception=e,
+                        run_id=run_id,
                     )
                 raise
 
@@ -395,6 +448,10 @@ async def _run_task_couple_with_attack(
     started_at = datetime.now()
     agent_name = agent.get_agent_name()
     message_history = _setup_history(system_prompt)
+    run_id: str | None = None
+    partial_messages: list[ModelMessage] = []
+    partial_usage = RunUsage()
+    partial_attacks: Mapping[str, InjectionAttackT] | None = None
 
     async with (
         concurrency_limiter,
@@ -413,6 +470,33 @@ async def _run_task_couple_with_attack(
                 pre_env_state = None
 
             try:
+                if persistence:
+                    run_id, _ = persistence.create_task_run_dir(couple.id)
+
+                async def persist_state(
+                    state: ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+                    attacks: Mapping[str, InjectionAttackT] | None,
+                ) -> None:
+                    nonlocal partial_messages, partial_usage, partial_attacks
+
+                    result_ctx = _state_run_context(state)
+                    partial_messages = list(result_ctx.messages)
+                    partial_usage = result_ctx.usage
+                    partial_attacks = attacks
+                    if persistence and run_id is not None:
+                        persistence.save_partial_execution(
+                            task_id=couple.id,
+                            run_id=run_id,
+                            messages=partial_messages,
+                            usage=partial_usage,
+                            task_span=task_span,
+                            generated_attacks=partial_attacks,
+                        )
+
+                attack_kwargs = {}
+                if persistence and _supports_state_callback(attack):
+                    attack_kwargs["state_callback"] = persist_state
+
                 with create_attack_span(attack):
                     end_state, generated_attacks = await attack.attack(
                         agent=agent,
@@ -424,6 +508,7 @@ async def _run_task_couple_with_attack(
                         malicious_task=couple.malicious,
                         usage_limits=usage_limits or UsageLimits(),
                         instrument=instrument,
+                        **attack_kwargs,
                     )
 
                 result_ctx = end_state.run_ctx
@@ -447,6 +532,7 @@ async def _run_task_couple_with_attack(
                         task_span=task_span,
                         started_at=started_at,
                         generated_attacks=generated_attacks,
+                        run_id=run_id,
                     )
 
                 return benign_eval, malicious_eval
@@ -460,11 +546,13 @@ async def _run_task_couple_with_attack(
                         couple=couple,
                         benign_eval=EvaluationResult(task_id=couple.benign.id, results={}),
                         malicious_eval=EvaluationResult(task_id=couple.malicious.id, results={}),
-                        messages=[],
-                        usage=RunUsage(),
+                        messages=partial_messages,
+                        usage=partial_usage,
                         task_span=task_span,
                         started_at=started_at,
                         exception=e,
+                        generated_attacks=partial_attacks,
+                        run_id=run_id,
                     )
                 raise
 

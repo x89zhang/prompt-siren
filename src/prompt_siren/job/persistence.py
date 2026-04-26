@@ -92,6 +92,56 @@ class JobPersistence:
         task_id_safe = sanitize_for_filename(task_id)
         return self.job_dir / task_id_safe / run_id
 
+    def create_task_run_dir(self, task_id: str) -> tuple[str, Path]:
+        """Create and return a stable run ID and directory for an in-progress run."""
+        run_id = str(uuid.uuid4())[:8]
+        run_dir = self.get_task_run_dir(task_id, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_id, run_dir
+
+    def save_partial_execution(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        messages: list[ModelMessage],
+        usage: RunUsage,
+        task_span: LogfireSpan,
+        generated_attacks: Mapping[str, InjectionAttack] | None = None,
+    ) -> Path:
+        """Save the latest known execution state without updating result/index files."""
+        run_dir = self.get_task_run_dir(task_id, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        now = datetime.now()
+        execution_id = str(uuid.uuid4())[:8]
+
+        span_context = task_span.get_span_context() if task_span is not None else None
+        trace_id = format(span_context.trace_id, "032x") if span_context else None
+        span_id = format(span_context.span_id, "016x") if span_context else None
+
+        attacks_dict: dict[str, Any] | None = None
+        if generated_attacks:
+            attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
+
+        execution = TaskRunExecution(
+            task_id=task_id,
+            run_id=run_id,
+            execution_id=execution_id,
+            timestamp=now,
+            trace_id=trace_id,
+            span_id=span_id,
+            messages=messages,
+            usage=usage,
+            attacks=attacks_dict,
+        )
+        execution_path = run_dir / TASK_EXECUTION_FILENAME
+        tmp_path = execution_path.with_suffix(f"{execution_path.suffix}.tmp")
+        with open(tmp_path, "w") as f:
+            f.write(execution.model_dump_json(indent=2))
+        tmp_path.replace(execution_path)
+        return run_dir
+
     def save_task_run(
         self,
         task: Task[EnvStateT],
@@ -103,6 +153,7 @@ class JobPersistence:
         exception: BaseException | None = None,
         generated_attacks: Mapping[str, InjectionAttack] | None = None,
         attack_score: float | None = None,
+        run_id: str | None = None,
     ) -> Path:
         """Save a single task run result and execution data.
 
@@ -120,8 +171,9 @@ class JobPersistence:
         Returns:
             Path to the run directory
         """
-        # Generate unique run ID
-        run_id = str(uuid.uuid4())[:8]
+        # Generate unique run ID if the run was not created up front for partial persistence.
+        if run_id is None:
+            run_id = str(uuid.uuid4())[:8]
         run_dir = self.get_task_run_dir(task.id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -202,6 +254,7 @@ class JobPersistence:
         started_at: datetime,
         exception: BaseException | None = None,
         generated_attacks: Mapping[str, InjectionAttack] | None = None,
+        run_id: str | None = None,
     ) -> Path:
         """Save a task couple run result and execution data.
 
@@ -219,8 +272,9 @@ class JobPersistence:
         Returns:
             Path to the run directory
         """
-        # Generate unique run ID
-        run_id = str(uuid.uuid4())[:8]
+        # Generate unique run ID if the run was not created up front for partial persistence.
+        if run_id is None:
+            run_id = str(uuid.uuid4())[:8]
         run_dir = self.get_task_run_dir(couple.id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
 

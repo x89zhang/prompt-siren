@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TypeVar
 
 from pydantic_ai import RunContext, UsageLimits
@@ -107,6 +107,14 @@ async def run_until_injectable(
     usage_limits: UsageLimits | None = None,
     attacks: InjectionAttacksDict[InjectionAttackT] | None = None,
     instrument: InstrumentationSettings | bool | None = None,
+    state_callback: Callable[
+        [
+            ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+            Mapping[str, InjectionAttackT] | None,
+        ],
+        Awaitable[None],
+    ]
+    | None = None,
 ) -> (
     InjectableModelRequestState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT]
     | EndState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT]
@@ -132,6 +140,9 @@ async def run_until_injectable(
         Either an InjectableModelRequestState (if injection opportunity found) or
         an EndState (if execution completed without finding injectable content)
     """
+    if state_callback is not None:
+        await state_callback(current_state, attacks)
+
     # If the initial state is already an InjectableModelRequestState, return it immediately
     if isinstance(current_state, InjectableModelRequestState):
         return current_state
@@ -144,6 +155,8 @@ async def run_until_injectable(
         attacks=attacks,
         instrument=instrument,
     ):
+        if state_callback is not None:
+            await state_callback(state, attacks)
         if isinstance(state, InjectableModelRequestState):
             return state
         current_state = state

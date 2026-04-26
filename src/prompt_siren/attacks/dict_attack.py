@@ -2,7 +2,7 @@
 """Dictionary-based attack implementation."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar
@@ -15,7 +15,7 @@ from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import UsageLimits
 
 from ..agents.abstract import AbstractAgent
-from ..agents.states import EndState
+from ..agents.states import EndState, ExecutionState
 from ..environments.abstract import AbstractEnvironment
 from ..tasks import BenignTask, MaliciousTask
 from ..types import (
@@ -77,6 +77,14 @@ class DictAttack(
         malicious_task: MaliciousTask[EnvStateT],
         usage_limits: UsageLimits,
         instrument: InstrumentationSettings | bool | None = None,
+        state_callback: Callable[
+            [
+                ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+                Mapping[str, InjectionAttackT] | None,
+            ],
+            Awaitable[None],
+        ]
+        | None = None,
     ) -> tuple[
         EndState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
         InjectionAttacksDict[InjectionAttackT],
@@ -112,6 +120,8 @@ class DictAttack(
             attacks=attacks_for_task,
             instrument=instrument,
         ):
+            if state_callback is not None:
+                await state_callback(state, attacks_for_task)
             if isinstance(state, EndState):
                 end_state = state
                 break

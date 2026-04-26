@@ -22,6 +22,9 @@ class SwebenchDatasetConfig(BaseModel):
     build_timeout: int = 1800
     """Docker build timeout in seconds (default: 30 minutes)."""
 
+    bash_timeout: int = 60
+    """Default timeout in seconds for agent bash tool commands."""
+
     # Registry configuration
     registry: str | None = "ghcr.io/ethz-spylab/prompt-siren-images"
     """Docker registry prefix for pulling pre-built images.

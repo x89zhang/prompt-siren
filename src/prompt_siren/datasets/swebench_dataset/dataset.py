@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from itertools import product
 
+from pydantic_ai import RunContext
 from pydantic_ai.tools import Tool
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -154,13 +155,25 @@ class SwebenchDataset(AbstractDataset[BashEnvState, str, str, StrContentAttack])
         return specs
 
 
-def make_swebench_toolsets() -> list[FunctionToolset[BashEnvState]]:
+def make_swebench_toolsets(bash_timeout: int = 60) -> list[FunctionToolset[BashEnvState]]:
     """Returns the toolsets for SWEBench suite.
 
     Returns:
         List of toolsets that agents can use with SWEBench tasks
     """
-    tools = [Tool(bash, takes_ctx=True)]
+    async def bash_with_configured_timeout(
+        run_ctx: RunContext[BashEnvState],
+        command: str | list[str],
+        timeout: int | None = None,
+    ) -> str:
+        return await bash(
+            run_ctx,
+            command,
+            timeout=timeout,
+            default_timeout=bash_timeout,
+        )
+
+    tools = [Tool(bash_with_configured_timeout, takes_ctx=True, name="bash")]
     return [FunctionToolset(tools)]
 
 
@@ -326,7 +339,7 @@ def create_swebench_dataset(
     injection_ids: list[InjectionVectorID] = [_INJECTION_PLACEHOLDER]
 
     # Load toolsets for this dataset
-    toolsets = make_swebench_toolsets()
+    toolsets = make_swebench_toolsets(config.bash_timeout)
 
     # Create the BashEnvironment with the sandbox manager
     environment = BashEnvironment[

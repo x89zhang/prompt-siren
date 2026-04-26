@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, ClassVar, Generic, TypeVar
@@ -14,7 +14,7 @@ from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import UsageLimits
 
 from ..agents.abstract import AbstractAgent
-from ..agents.states import EndState
+from ..agents.states import EndState, ExecutionState
 from ..environments.abstract import AbstractEnvironment
 from ..tasks import BenignTask, MaliciousTask
 from ..types import (
@@ -97,6 +97,14 @@ class TemplateStringAttack(
         malicious_task: MaliciousTask[EnvStateT],
         usage_limits: UsageLimits,
         instrument: InstrumentationSettings | bool | None = None,
+        state_callback: Callable[
+            [
+                ExecutionState[EnvStateT, str, str, StrContentAttack],
+                Mapping[str, StrContentAttack] | None,
+            ],
+            Awaitable[None],
+        ]
+        | None = None,
     ) -> tuple[
         EndState[EnvStateT, str, str, StrContentAttack],
         InjectionAttacksDict[StrContentAttack],
@@ -117,6 +125,7 @@ class TemplateStringAttack(
                 toolsets=toolsets,
                 usage_limits=usage_limits,
                 instrument=instrument,
+                state_callback=state_callback,
             )
             if isinstance(state, EndState):
                 return state, attacks
@@ -164,6 +173,8 @@ class TemplateStringAttack(
                 attacks=attacks,
                 instrument=instrument,
             )
+            if state_callback is not None:
+                await state_callback(state, attacks)
 
         return state, attacks
 
