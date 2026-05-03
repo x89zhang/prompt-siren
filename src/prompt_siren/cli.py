@@ -244,12 +244,27 @@ def start_attack(
     show_default=True,
     help="Write partial resumes to a new run directory instead of overwriting the checkpoint.",
 )
+@click.option(
+    "--resume-only-partial/--fill-required-runs",
+    default=True,
+    show_default=True,
+    help="When incomplete checkpoints exist, resume only those checkpoints instead of filling n_runs_per_task with fresh runs.",
+)
+@click.option(
+    "--partial-repeats",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of times to resume each incomplete checkpoint.",
+)
 @click.argument("overrides", nargs=-1)
 def resume(
     job_path: Path,
     retry_on_error: tuple[str, ...],
     resume_partial: bool,
     copy_partial: bool,
+    resume_only_partial: bool,
+    partial_repeats: int,
     overrides: tuple[str, ...],
 ):
     """Resume an existing job from its job directory.
@@ -263,7 +278,12 @@ def resume(
         prompt-siren jobs resume -p ./jobs/my-job -e TimeoutError -e CancelledError
         prompt-siren jobs resume -p ./jobs/my-job -e ''  # disable retries
         prompt-siren jobs resume -p ./jobs/my-job execution.concurrency=8
+        prompt-siren jobs resume -p ./jobs/my-job --partial-repeats 5
     """
+    if partial_repeats > 1 and not copy_partial:
+        click.echo("Error: --partial-repeats > 1 requires --copy-partial.", err=True)
+        raise SystemExit(1)
+
     # Handle retry_on_error: empty string means "no retries"
     retry_errors: list[str] | None = None
     if retry_on_error:
@@ -280,6 +300,8 @@ def resume(
             retry_on_errors=retry_errors,
             resume_partial=resume_partial,
             resume_partial_in_place=not copy_partial,
+            resume_only_partial=resume_only_partial,
+            resume_partial_repeats=partial_repeats,
         )
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)

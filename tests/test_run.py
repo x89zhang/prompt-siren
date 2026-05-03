@@ -36,10 +36,12 @@ from prompt_siren.job.models import (
     TaskRunResumeState,
 )
 from prompt_siren.run import (
+    _merge_checkpoint_trajectory_labels,
     run_single_tasks_without_attack,
     run_task_couples_with_attack,
 )
 from prompt_siren.tasks import BenignTask, MaliciousTask, TaskCouple, TaskResult
+from prompt_siren.trajectory_labeling import MessageLabel, TrajectoryLabels
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -63,6 +65,44 @@ from .conftest import (
 )
 
 pytestmark = pytest.mark.anyio
+
+
+def test_merge_checkpoint_trajectory_labels_preserves_higher_checkpoint_level():
+    labels = TrajectoryLabels(
+        trajectory_level="L1",
+        first_occurrence={
+            "L1": {"message_index": 0, "evidence": []},
+            "L2": None,
+            "L3": None,
+            "L4": None,
+        },
+        first_reach={
+            "L1": {"message_index": 0, "reached_by": "L1", "evidence": []},
+            "L2": None,
+            "L3": None,
+            "L4": None,
+        },
+        messages=[
+            MessageLabel(message_index=0, message_level="L1", evidence=[]),
+            MessageLabel(message_index=1, message_level="L0", evidence=[]),
+        ],
+    )
+    checkpoint_labels = {
+        "messages": [
+            {"message_index": 0, "message_level": "L1", "evidence": []},
+            {
+                "message_index": 1,
+                "message_level": "L2",
+                "evidence": [{"level": "L2", "reason": "checkpoint"}],
+            },
+        ]
+    }
+
+    merged = _merge_checkpoint_trajectory_labels(labels, checkpoint_labels)
+
+    assert merged.trajectory_level == "L2"
+    assert merged.messages[1].message_level == "L2"
+    assert merged.first_occurrence["L2"]["message_index"] == 1
 
 
 class TestRunBenignTasks:

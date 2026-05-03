@@ -48,7 +48,15 @@ from .tasks import (
 )
 from .telemetry.formatted_span import formatted_span
 from .telemetry.workbench_spans import create_attack_span, create_task_span
-from .trajectory_labeling import label_trajectory_async, TrajectoryLabels
+from .trajectory_labeling import (
+    first_occurrences,
+    first_reach,
+    label_trajectory_async,
+    level_max,
+    LEVEL_RANK,
+    MessageLabel,
+    TrajectoryLabels,
+)
 from .types import InjectionAttack, InjectionAttacksDictTypeAdapter
 
 EntityT = TypeVar("EntityT")
@@ -185,6 +193,7 @@ async def _label_trajectory_for_result(
     persistence: JobPersistence | None,
     generated_attacks: Mapping[str, InjectionAttack] | None,
     attack_score: float | None,
+    checkpoint_trajectory_labels: Mapping[str, object] | None = None,
 ) -> TrajectoryLabels | None:
     if persistence is None:
         return None
@@ -211,7 +220,59 @@ async def _label_trajectory_for_result(
         logfire.error(f"Failed to label trajectory; falling back to persistence labeling: {e}")
         return None
 
-    return labels
+    return _merge_checkpoint_trajectory_labels(labels, checkpoint_trajectory_labels)
+
+
+def _merge_checkpoint_trajectory_labels(
+    labels: TrajectoryLabels,
+    checkpoint_trajectory_labels: Mapping[str, object] | None,
+) -> TrajectoryLabels:
+    """Preserve checkpoint message labels as a lower bound after resume.
+
+    Resume experiments start from a labeled partial trajectory. Final relabeling
+    may involve an LLM judge and can be non-deterministic, but the resumed full
+    trajectory still contains the checkpoint prefix. Therefore the final labels
+    should not downgrade any message label already assigned to that prefix.
+    """
+    if not checkpoint_trajectory_labels:
+        return labels
+
+    checkpoint_messages = checkpoint_trajectory_labels.get("messages")
+    if not isinstance(checkpoint_messages, list):
+        return labels
+
+    merged_messages = list(labels.messages)
+    for checkpoint_label in checkpoint_messages:
+        if not isinstance(checkpoint_label, dict):
+            continue
+        index = checkpoint_label.get("message_index")
+        level = checkpoint_label.get("message_level")
+        evidence = checkpoint_label.get("evidence", [])
+        if (
+            not isinstance(index, int)
+            or not isinstance(level, str)
+            or level not in LEVEL_RANK
+            or index < 0
+            or index >= len(merged_messages)
+        ):
+            continue
+
+        current = merged_messages[index]
+        if LEVEL_RANK[level] <= LEVEL_RANK[current.message_level]:
+            continue
+
+        merged_messages[index] = MessageLabel(
+            message_index=current.message_index,
+            message_level=level,
+            evidence=evidence if isinstance(evidence, list) else [],
+        )
+
+    return TrajectoryLabels(
+        trajectory_level=level_max(item.message_level for item in merged_messages),
+        first_occurrence=first_occurrences(merged_messages),
+        first_reach=first_reach(merged_messages),
+        messages=merged_messages,
+    )
 
 
 def _log_single_task_result(
@@ -387,6 +448,7 @@ async def _run_single_task_without_attack(
     run_id: str | None = None
     partial_messages: list[ModelMessage] = []
     partial_usage = RunUsage()
+    checkpoint_trajectory_labels: Mapping[str, object] | None = None
 
     async with (
         concurrency_limiter,
@@ -425,6 +487,7 @@ async def _run_single_task_without_attack(
                         execution = persistence.load_execution(task.id, source_run_id)
                         partial_messages = list(execution.messages)
                         partial_usage = execution.usage
+                        checkpoint_trajectory_labels = execution.trajectory_labels
                         resume_state = _execution_state_from_checkpoint(
                             execution=execution,
                             agent=agent,
@@ -508,6 +571,7 @@ async def _run_single_task_without_attack(
                         persistence=persistence,
                         generated_attacks=None,
                         attack_score=None,
+                        checkpoint_trajectory_labels=checkpoint_trajectory_labels,
                     )
                     persistence.save_task_run(
                         task=task,
@@ -578,7 +642,7 @@ async def run_single_tasks_without_attack(
     incomplete_run_ids: dict[str, list[str]] = {}
     if persistence is not None:
         incomplete_run_ids = {
-            task.id: persistence.list_incomplete_run_ids(task.id) for task in tasks
+            task.id: persistence.list_resume_run_ids(task.id) for task in tasks
         }
 
     async def run_single(task: Task[EnvStateT]) -> SingleTaskExecutionResult[EnvStateT]:
@@ -691,6 +755,7 @@ async def _run_task_couple_with_attack(
     partial_messages: list[ModelMessage] = []
     partial_usage = RunUsage()
     partial_attacks: Mapping[str, InjectionAttackT] | None = None
+    checkpoint_trajectory_labels: Mapping[str, object] | None = None
 
     async with (
         concurrency_limiter,
@@ -718,6 +783,7 @@ async def _run_task_couple_with_attack(
                         execution = persistence.load_execution(couple.id, source_run_id)
                         partial_messages = list(execution.messages)
                         partial_usage = execution.usage
+                        checkpoint_trajectory_labels = execution.trajectory_labels
                         if execution.attacks is not None:
                             resume_attacks = InjectionAttacksDictTypeAdapter.validate_python(
                                 execution.attacks
@@ -826,6 +892,7 @@ async def _run_task_couple_with_attack(
                         persistence=persistence,
                         generated_attacks=generated_attacks,
                         attack_score=malicious_score,
+                        checkpoint_trajectory_labels=checkpoint_trajectory_labels,
                     )
                     persistence.save_couple_run(
                         couple=couple,
@@ -902,7 +969,7 @@ async def run_task_couples_with_attack(
     incomplete_run_ids: dict[str, list[str]] = {}
     if persistence is not None:
         incomplete_run_ids = {
-            couple.id: persistence.list_incomplete_run_ids(couple.id) for couple in couples
+            couple.id: persistence.list_resume_run_ids(couple.id) for couple in couples
         }
 
     async def run_couple(

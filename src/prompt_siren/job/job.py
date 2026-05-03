@@ -123,6 +123,8 @@ class Job:
         retry_on_errors: list[str] | None = None,
         resume_partial: bool = True,
         resume_partial_in_place: bool = False,
+        resume_only_partial: bool = True,
+        resume_partial_repeats: int = 1,
     ) -> Job:
         """Resume an existing job from its directory.
 
@@ -132,6 +134,8 @@ class Job:
             retry_on_errors: Error types to retry (delete runs with these exceptions)
             resume_partial: Preserve incomplete runs with execution data for mid-run resume
             resume_partial_in_place: Write resumed execution back into the original run dir
+            resume_only_partial: Run only incomplete checkpoints instead of filling n_runs_per_task
+            resume_partial_repeats: Number of times to resume each incomplete checkpoint
 
         Returns:
             Job instance configured for resumption
@@ -154,6 +158,8 @@ class Job:
         # Create job instance
         job = cls(job_dir, job_config)
         job.persistence.resume_partial_in_place = resume_partial_in_place
+        job.persistence.resume_only_partial = resume_only_partial
+        job.persistence.resume_partial_repeats = resume_partial_repeats
 
         # Handle retry logic
         job._cleanup_for_retry(retry_on_errors, resume_partial=resume_partial)

@@ -40,6 +40,13 @@ def _expand_entities_for_required_runs(
     selected_entities: list[RunnableEntityT],
 ) -> list[RunnableEntityT]:
     """Repeat selected entities until each reaches the job's n_runs_per_task target."""
+    if job.persistence.resume_only_partial:
+        expanded_entities: list[RunnableEntityT] = []
+        for entity in selected_entities:
+            n_resume_runs = len(job.persistence.list_resume_run_ids(entity.id))
+            expanded_entities.extend([entity] * n_resume_runs)
+        return expanded_entities
+
     run_counts = job.persistence.get_run_counts()
     n_required = job.job_config.n_runs_per_task
     expanded_entities: list[RunnableEntityT] = []

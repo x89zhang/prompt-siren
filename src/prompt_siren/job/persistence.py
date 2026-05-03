@@ -61,6 +61,8 @@ class JobPersistence:
         self.job_dir = job_dir
         self.job_config = job_config
         self.resume_partial_in_place = False
+        self.resume_only_partial = False
+        self.resume_partial_repeats = 1
 
     @classmethod
     def create(cls, job_dir: Path, job_config: JobConfig) -> JobPersistence:
@@ -168,6 +170,17 @@ class JobPersistence:
                 continue
             run_ids.append(run_dir.name)
         return run_ids
+
+    def list_resume_run_ids(self, task_id: str) -> list[str]:
+        """Return incomplete run IDs expanded by the configured resume repeat count."""
+        run_ids = self.list_incomplete_run_ids(task_id)
+        if self.resume_partial_repeats <= 1:
+            return run_ids
+        return [
+            run_id
+            for run_id in run_ids
+            for _ in range(self.resume_partial_repeats)
+        ]
 
     def save_task_run(
         self,

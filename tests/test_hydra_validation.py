@@ -6,8 +6,82 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from prompt_siren.config.exceptions import ConfigValidationError
 from prompt_siren.config.export import export_default_config
-from prompt_siren.hydra_app import validate_config
+from prompt_siren.hydra_app import _expand_entities_for_required_runs, validate_config
 from prompt_siren.registry_base import UnknownComponentError
+
+
+class _Entity:
+    def __init__(self, entity_id: str):
+        self.id = entity_id
+
+
+class _Persistence:
+    def __init__(self):
+        self.resume_only_partial = False
+        self._run_counts = {}
+        self._resume_run_ids = {}
+
+    def get_run_counts(self):
+        return self._run_counts
+
+    def list_resume_run_ids(self, entity_id: str):
+        return self._resume_run_ids.get(entity_id, [])
+
+
+class _JobConfig:
+    n_runs_per_task = 1
+
+
+class _Job:
+    def __init__(self):
+        self.persistence = _Persistence()
+        self.job_config = _JobConfig()
+
+
+class TestExpandEntitiesForRequiredRuns:
+    """Test job-run expansion for fresh and checkpoint resume scheduling."""
+
+    def test_expands_to_required_fresh_run_count(self):
+        job = _Job()
+        job.job_config.n_runs_per_task = 3
+        job.persistence._run_counts = {"task1": 1}
+        task1 = _Entity("task1")
+        task2 = _Entity("task2")
+
+        expanded = _expand_entities_for_required_runs(job, [task1, task2])
+
+        assert [entity.id for entity in expanded] == [
+            "task1",
+            "task1",
+            "task2",
+            "task2",
+            "task2",
+        ]
+
+    def test_resume_only_partial_expands_only_incomplete_checkpoints(self):
+        job = _Job()
+        job.job_config.n_runs_per_task = 5
+        job.persistence.resume_only_partial = True
+        job.persistence._resume_run_ids = {"task1": ["checkpoint-a"], "task2": []}
+        task1 = _Entity("task1")
+        task2 = _Entity("task2")
+
+        expanded = _expand_entities_for_required_runs(job, [task1, task2])
+
+        assert [entity.id for entity in expanded] == ["task1"]
+
+    def test_resume_only_partial_honors_repeated_checkpoint_ids(self):
+        job = _Job()
+        job.job_config.n_runs_per_task = 5
+        job.persistence.resume_only_partial = True
+        job.persistence._resume_run_ids = {
+            "task1": ["checkpoint-a", "checkpoint-a", "checkpoint-a"]
+        }
+        task1 = _Entity("task1")
+
+        expanded = _expand_entities_for_required_runs(job, [task1])
+
+        assert [entity.id for entity in expanded] == ["task1", "task1", "task1"]
 
 
 @pytest.mark.usefixtures("mock_api_keys")
