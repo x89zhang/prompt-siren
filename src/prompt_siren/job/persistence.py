@@ -17,6 +17,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import RunUsage
 
 from ..tasks import EvaluationResult, Task, TaskCouple
+from ..trajectory_labeling import label_trajectory
 from ..types import InjectionAttack, InjectionAttacksDictTypeAdapter
 from .models import (
     CONFIG_FILENAME,
@@ -221,6 +222,16 @@ class JobPersistence:
         trace_id = format(span_context.trace_id, "032x") if span_context else None
         span_id = format(span_context.span_id, "016x") if span_context else None
 
+        attacks_dict: dict[str, Any] | None = None
+        if generated_attacks:
+            attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
+
+        trajectory_labels = label_trajectory(
+            messages,
+            attacks=attacks_dict,
+            attack_score=attack_score,
+        )
+
         # Save result.json (lightweight)
         result = TaskRunResult(
             task_id=task.id,
@@ -229,6 +240,7 @@ class JobPersistence:
             finished_at=now,
             benign_score=benign_score,
             attack_score=attack_score,
+            trajectory_level=trajectory_labels.trajectory_level,
             exception_info=exception_info,
         )
         result_path = run_dir / TASK_RESULT_FILENAME
@@ -236,11 +248,6 @@ class JobPersistence:
             f.write(result.model_dump_json(indent=2))
 
         # Save execution.json (heavy)
-        # Convert attacks to serializable format
-        attacks_dict: dict[str, Any] | None = None
-        if generated_attacks:
-            attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
-
         execution = TaskRunExecution(
             task_id=task.id,
             run_id=run_id,
@@ -327,6 +334,16 @@ class JobPersistence:
         trace_id = format(span_context.trace_id, "032x") if span_context else None
         span_id = format(span_context.span_id, "016x") if span_context else None
 
+        attacks_dict: dict[str, Any] | None = None
+        if generated_attacks:
+            attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
+
+        trajectory_labels = label_trajectory(
+            messages,
+            attacks=attacks_dict,
+            attack_score=attack_score,
+        )
+
         # Save result.json (lightweight)
         result = TaskRunResult(
             task_id=couple.id,
@@ -335,6 +352,7 @@ class JobPersistence:
             finished_at=now,
             benign_score=benign_score,
             attack_score=attack_score,
+            trajectory_level=trajectory_labels.trajectory_level,
             exception_info=exception_info,
         )
         result_path = run_dir / TASK_RESULT_FILENAME
@@ -342,10 +360,6 @@ class JobPersistence:
             f.write(result.model_dump_json(indent=2))
 
         # Save execution.json (heavy)
-        attacks_dict: dict[str, Any] | None = None
-        if generated_attacks:
-            attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
-
         execution = TaskRunExecution(
             task_id=couple.id,
             run_id=run_id,

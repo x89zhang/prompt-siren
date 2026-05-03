@@ -32,3 +32,4 @@ traces
 .claude/*
 multirun/*
 jobs
+prompt_siren_experiment_design.md

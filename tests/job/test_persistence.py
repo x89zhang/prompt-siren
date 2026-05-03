@@ -123,6 +123,7 @@ class TestSaveTaskRun:
         loaded = TaskRunResult.model_validate_json((run_dir / TASK_RESULT_FILENAME).read_text())
         assert loaded.task_id == "task1"
         assert loaded.benign_score == 0.85
+        assert loaded.trajectory_level == "L0"
 
     def test_appends_entry_to_index(
         self, job_persistence: JobPersistence, mock_task_span: MagicMock
@@ -186,6 +187,7 @@ class TestSaveCoupleRun:
         loaded = TaskRunResult.model_validate_json((run_dir / TASK_RESULT_FILENAME).read_text())
         assert loaded.benign_score == 0.9
         assert loaded.attack_score == 0.3
+        assert loaded.trajectory_level == "L4"
 
 
 class TestSavePartialExecution:
