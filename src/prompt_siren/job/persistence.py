@@ -28,6 +28,7 @@ from .models import (
     TASK_RESULT_FILENAME,
     TaskRunExecution,
     TaskRunResult,
+    TaskRunResumeState,
 )
 from .naming import sanitize_for_filename
 
@@ -58,6 +59,7 @@ class JobPersistence:
         """
         self.job_dir = job_dir
         self.job_config = job_config
+        self.resume_partial_in_place = False
 
     @classmethod
     def create(cls, job_dir: Path, job_config: JobConfig) -> JobPersistence:
@@ -108,6 +110,7 @@ class JobPersistence:
         usage: RunUsage,
         task_span: LogfireSpan,
         generated_attacks: Mapping[str, InjectionAttack] | None = None,
+        resume_state: TaskRunResumeState | None = None,
     ) -> Path:
         """Save the latest known execution state without updating result/index files."""
         run_dir = self.get_task_run_dir(task_id, run_id)
@@ -134,6 +137,7 @@ class JobPersistence:
             messages=messages,
             usage=usage,
             attacks=attacks_dict,
+            resume_state=resume_state,
         )
         execution_path = run_dir / TASK_EXECUTION_FILENAME
         tmp_path = execution_path.with_suffix(f"{execution_path.suffix}.tmp")
@@ -141,6 +145,28 @@ class JobPersistence:
             f.write(execution.model_dump_json(indent=2))
         tmp_path.replace(execution_path)
         return run_dir
+
+    def load_execution(self, task_id: str, run_id: str) -> TaskRunExecution:
+        """Load execution data for a task run."""
+        execution_path = self.get_task_run_dir(task_id, run_id) / TASK_EXECUTION_FILENAME
+        return TaskRunExecution.model_validate_json(execution_path.read_text())
+
+    def list_incomplete_run_ids(self, task_id: str) -> list[str]:
+        """Return run IDs with execution data but no final result for a task/couple."""
+        task_dir = self.job_dir / sanitize_for_filename(task_id)
+        if not task_dir.exists():
+            return []
+
+        run_ids: list[str] = []
+        for run_dir in sorted(task_dir.iterdir(), key=lambda path: path.name):
+            if not run_dir.is_dir():
+                continue
+            if (run_dir / TASK_RESULT_FILENAME).exists():
+                continue
+            if not (run_dir / TASK_EXECUTION_FILENAME).exists():
+                continue
+            run_ids.append(run_dir.name)
+        return run_ids
 
     def save_task_run(
         self,

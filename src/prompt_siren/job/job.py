@@ -121,6 +121,8 @@ class Job:
         job_dir: Path,
         overrides: list[str] | None = None,
         retry_on_errors: list[str] | None = None,
+        resume_partial: bool = True,
+        resume_partial_in_place: bool = False,
     ) -> Job:
         """Resume an existing job from its directory.
 
@@ -128,6 +130,8 @@ class Job:
             job_dir: Path to the job directory
             overrides: Hydra-style overrides for execution-related fields
             retry_on_errors: Error types to retry (delete runs with these exceptions)
+            resume_partial: Preserve incomplete runs with execution data for mid-run resume
+            resume_partial_in_place: Write resumed execution back into the original run dir
 
         Returns:
             Job instance configured for resumption
@@ -149,15 +153,18 @@ class Job:
 
         # Create job instance
         job = cls(job_dir, job_config)
+        job.persistence.resume_partial_in_place = resume_partial_in_place
 
         # Handle retry logic
-        job._cleanup_for_retry(retry_on_errors)
+        job._cleanup_for_retry(retry_on_errors, resume_partial=resume_partial)
 
         return job
 
     def _cleanup_for_retry(
         self,
         retry_on_errors: Sequence[str] | None,
+        *,
+        resume_partial: bool = True,
     ) -> None:
         """Clean up run directories for retry based on error filtering.
 
@@ -192,6 +199,13 @@ class Job:
             for run_dir in task_dir.iterdir():
                 if run_dir.is_dir():
                     result_path = run_dir / "result.json"
+                    execution_path = run_dir / "execution.json"
+                    if (
+                        resume_partial
+                        and not result_path.exists()
+                        and execution_path.exists()
+                    ):
+                        continue
                     if not result_path.exists():
                         # Incomplete run, delete it
                         shutil.rmtree(run_dir)

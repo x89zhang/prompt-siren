@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Generic, TypeAlias, TypeVar
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart
 
 # ExceptionGroup is built-in in Python 3.11+, needs backport for 3.10
 if sys.version_info < (3, 11):
@@ -19,15 +19,24 @@ import anyio
 import logfire
 from logfire import LogfireSpan
 from pydantic_ai import InstrumentationSettings, RunContext
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import assert_never
 
 from .agents.abstract import AbstractAgent
-from .agents.states import EndState, ExecutionState
+from .agents.states import (
+    EndState,
+    ExecutionState,
+    FinishReason,
+    InjectableModelRequestState,
+    ModelRequestState,
+    ModelResponseState,
+)
 from .attacks.abstract import AbstractAttack
 from .environments.abstract import AbstractEnvironment
 from .job import JobPersistence
+from .job.models import TaskRunExecution, TaskRunResumeState
 from .tasks import (
     BenignTask,
     EvaluationResult,
@@ -38,7 +47,7 @@ from .tasks import (
 )
 from .telemetry.formatted_span import formatted_span
 from .telemetry.workbench_spans import create_attack_span, create_task_span
-from .types import InjectionAttack
+from .types import InjectionAttack, InjectionAttacksDictTypeAdapter
 
 EntityT = TypeVar("EntityT")
 ResultT = TypeVar("ResultT")
@@ -177,6 +186,113 @@ def _state_run_context(
     return state.run_ctx
 
 
+def _resume_state_from_execution_state(
+    state: ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+) -> TaskRunResumeState:
+    match state:
+        case ModelRequestState(model_request=model_request):
+            return TaskRunResumeState(
+                state_kind="model_request",
+                model_request=model_request,
+            )
+        case InjectableModelRequestState(injectable_model_request_parts=parts):
+            return TaskRunResumeState(
+                state_kind="injectable_model_request",
+                injectable_model_request_parts=list(parts),
+            )
+        case ModelResponseState():
+            return TaskRunResumeState(state_kind="model_response")
+        case EndState():
+            return TaskRunResumeState(state_kind="end")
+        case _:
+            assert_never(state)
+
+
+def _execution_state_from_checkpoint(
+    *,
+    execution: TaskRunExecution,
+    agent: AbstractAgent,
+    environment: AbstractEnvironment[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
+    env_state: EnvStateT,
+) -> ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT] | None:
+    """Rebuild a resumable state from execution.json.
+
+    Older execution files do not contain resume_state. For those, only a history
+    ending in ModelResponse can be resumed because the pending request is already
+    represented in message history.
+    """
+    model = getattr(agent.config, "model", TestModel())
+    run_ctx: RunContext[EnvStateT] = RunContext(
+        deps=env_state,
+        model=model,
+        usage=execution.usage,
+        messages=list(execution.messages),
+    )
+
+    if execution.resume_state is None:
+        if execution.messages and isinstance(execution.messages[-1], ModelResponse):
+            return ModelResponseState(
+                run_ctx=run_ctx,
+                environment=environment,
+                model_response=execution.messages[-1],
+                _previous_state=ModelRequestState(
+                    run_ctx=run_ctx,
+                    environment=environment,
+                    model_request=ModelRequest(parts=[]),
+                    _previous_state=None,
+                ),
+            )
+        return None
+
+    match execution.resume_state.state_kind:
+        case "model_request":
+            if execution.resume_state.model_request is None:
+                return None
+            return ModelRequestState(
+                run_ctx=run_ctx,
+                environment=environment,
+                model_request=execution.resume_state.model_request,
+                _previous_state=None,
+            )
+        case "injectable_model_request":
+            if execution.resume_state.injectable_model_request_parts is None:
+                return None
+            return InjectableModelRequestState(
+                run_ctx=run_ctx,
+                environment=environment,
+                injectable_model_request_parts=execution.resume_state.injectable_model_request_parts,
+                _previous_state=None,
+            )
+        case "model_response":
+            if not execution.messages or not isinstance(execution.messages[-1], ModelResponse):
+                return None
+            return ModelResponseState(
+                run_ctx=run_ctx,
+                environment=environment,
+                model_response=execution.messages[-1],
+                _previous_state=ModelRequestState(
+                    run_ctx=run_ctx,
+                    environment=environment,
+                    model_request=ModelRequest(parts=[]),
+                    _previous_state=None,
+                ),
+            )
+        case "end":
+            return EndState(
+                run_ctx=run_ctx,
+                environment=environment,
+                finish_reason=FinishReason.AGENT_LOOP_END,
+                _previous_state=ModelRequestState(
+                    run_ctx=run_ctx,
+                    environment=environment,
+                    model_request=ModelRequest(parts=[]),
+                    _previous_state=None,
+                ),
+            )
+        case _:
+            assert_never(execution.resume_state.state_kind)
+
+
 def _supports_state_callback(attack: AbstractAttack) -> bool:
     params = inspect.signature(attack.attack).parameters
     return "state_callback" in params or any(
@@ -194,6 +310,7 @@ async def _run_single_task_without_attack(
     concurrency_limiter: asyncio.BoundedSemaphore | nullcontext,
     instrument: InstrumentationSettings | bool | None,
     persistence: JobPersistence | None = None,
+    resume_run_id: str | None = None,
 ) -> EvaluationResult:
     """Run and evaluate a single task. Returns single evaluation result."""
 
@@ -232,33 +349,64 @@ async def _run_single_task_without_attack(
 
             try:
                 if persistence:
-                    run_id, _ = persistence.create_task_run_dir(task.id)
+                    source_run_id = resume_run_id
+                    run_id = source_run_id
+                    resume_state = None
+                    if source_run_id is None:
+                        run_id, _ = persistence.create_task_run_dir(task.id)
+                    else:
+                        execution = persistence.load_execution(task.id, source_run_id)
+                        partial_messages = list(execution.messages)
+                        partial_usage = execution.usage
+                        resume_state = _execution_state_from_checkpoint(
+                            execution=execution,
+                            agent=agent,
+                            environment=environment,
+                            env_state=env_state,
+                        )
+                        if not persistence.resume_partial_in_place:
+                            run_id, _ = persistence.create_task_run_dir(task.id)
 
                     # Execute task, persisting the latest state after each transition.
                     end_state = None
-                    async for state in agent.iter(
-                        environment,
-                        env_state,
-                        prompt,
-                        message_history=message_history,
-                        toolsets=toolsets,
-                        attacks=None,
-                        usage_limits=usage_limits,
-                        instrument=instrument,
-                    ):
-                        result_ctx = _state_run_context(state)
-                        partial_messages = list(result_ctx.messages)
-                        partial_usage = result_ctx.usage
-                        persistence.save_partial_execution(
-                            task_id=task.id,
-                            run_id=run_id,
-                            messages=partial_messages,
-                            usage=partial_usage,
-                            task_span=task_span,
+                    if isinstance(resume_state, EndState):
+                        end_state = resume_state
+                    else:
+                        state_iter = (
+                            agent.resume_iter_from_state(
+                                current_state=resume_state,
+                                toolsets=toolsets,
+                                attacks=None,
+                                usage_limits=usage_limits,
+                                instrument=instrument,
+                            )
+                            if resume_state is not None
+                            else agent.iter(
+                                environment,
+                                env_state,
+                                prompt,
+                                message_history=message_history,
+                                toolsets=toolsets,
+                                attacks=None,
+                                usage_limits=usage_limits,
+                                instrument=instrument,
+                            )
                         )
-                        if isinstance(state, EndState):
-                            end_state = state
-                            break
+                        async for state in state_iter:
+                            result_ctx = _state_run_context(state)
+                            partial_messages = list(result_ctx.messages)
+                            partial_usage = result_ctx.usage
+                            persistence.save_partial_execution(
+                                task_id=task.id,
+                                run_id=run_id,
+                                messages=partial_messages,
+                                usage=partial_usage,
+                                task_span=task_span,
+                                resume_state=_resume_state_from_execution_state(state),
+                            )
+                            if isinstance(state, EndState):
+                                end_state = state
+                                break
 
                     if not isinstance(end_state, EndState):
                         raise RuntimeError("Agent iteration completed without reaching EndState")
@@ -348,9 +496,17 @@ async def run_single_tasks_without_attack(
     concurrency_limiter = (
         asyncio.BoundedSemaphore(max_concurrency) if max_concurrency is not None else nullcontext()
     )
+    incomplete_run_ids: dict[str, list[str]] = {}
+    if persistence is not None:
+        incomplete_run_ids = {
+            task.id: persistence.list_incomplete_run_ids(task.id) for task in tasks
+        }
 
     async def run_single(task: Task[EnvStateT]) -> SingleTaskExecutionResult[EnvStateT]:
         """Run task and return result or error without propagating."""
+        resume_run_id = None
+        if incomplete_run_ids.get(task.id):
+            resume_run_id = incomplete_run_ids[task.id].pop(0)
         try:
             result = await _run_single_task_without_attack(
                 task,
@@ -362,6 +518,7 @@ async def run_single_tasks_without_attack(
                 concurrency_limiter,
                 instrument,
                 persistence,
+                resume_run_id,
             )
             return ExecutionOk(task, result)
         except (Exception, asyncio.CancelledError) as e:
@@ -442,6 +599,7 @@ async def _run_task_couple_with_attack(
     instrument: InstrumentationSettings | bool | None,
     attack: AbstractAttack[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
     persistence: JobPersistence | None = None,
+    resume_run_id: str | None = None,
 ) -> tuple[EvaluationResult, EvaluationResult]:
     """Run and evaluate a task couple. Returns benign + malicious results."""
 
@@ -449,6 +607,8 @@ async def _run_task_couple_with_attack(
     agent_name = agent.get_agent_name()
     message_history = _setup_history(system_prompt)
     run_id: str | None = None
+    resume_state = None
+    resume_attacks = None
     partial_messages: list[ModelMessage] = []
     partial_usage = RunUsage()
     partial_attacks: Mapping[str, InjectionAttackT] | None = None
@@ -471,7 +631,27 @@ async def _run_task_couple_with_attack(
 
             try:
                 if persistence:
-                    run_id, _ = persistence.create_task_run_dir(couple.id)
+                    source_run_id = resume_run_id
+                    run_id = source_run_id
+                    if source_run_id is None:
+                        run_id, _ = persistence.create_task_run_dir(couple.id)
+                    else:
+                        execution = persistence.load_execution(couple.id, source_run_id)
+                        partial_messages = list(execution.messages)
+                        partial_usage = execution.usage
+                        if execution.attacks is not None:
+                            resume_attacks = InjectionAttacksDictTypeAdapter.validate_python(
+                                execution.attacks
+                            )
+                            partial_attacks = resume_attacks
+                        resume_state = _execution_state_from_checkpoint(
+                            execution=execution,
+                            agent=agent,
+                            environment=environment,
+                            env_state=env_state,
+                        )
+                        if not persistence.resume_partial_in_place:
+                            run_id, _ = persistence.create_task_run_dir(couple.id)
 
                 async def persist_state(
                     state: ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
@@ -491,6 +671,7 @@ async def _run_task_couple_with_attack(
                             usage=partial_usage,
                             task_span=task_span,
                             generated_attacks=partial_attacks,
+                            resume_state=_resume_state_from_execution_state(state),
                         )
 
                 attack_kwargs = {}
@@ -498,18 +679,53 @@ async def _run_task_couple_with_attack(
                     attack_kwargs["state_callback"] = persist_state
 
                 with create_attack_span(attack):
-                    end_state, generated_attacks = await attack.attack(
-                        agent=agent,
-                        environment=environment,
-                        message_history=message_history,
-                        env_state=env_state,
-                        toolsets=toolsets,
-                        benign_task=couple.benign,
-                        malicious_task=couple.malicious,
-                        usage_limits=usage_limits or UsageLimits(),
-                        instrument=instrument,
-                        **attack_kwargs,
-                    )
+                    if resume_state is not None and hasattr(attack, "resume_attack_from_state"):
+                        end_state, generated_attacks = await attack.resume_attack_from_state(
+                            agent=agent,
+                            environment=environment,
+                            current_state=resume_state,
+                            toolsets=toolsets,
+                            benign_task=couple.benign,
+                            malicious_task=couple.malicious,
+                            usage_limits=usage_limits or UsageLimits(),
+                            attacks=resume_attacks,
+                            instrument=instrument,
+                            **attack_kwargs,
+                        )
+                    elif resume_state is not None:
+                        if isinstance(resume_state, EndState):
+                            end_state = resume_state
+                        else:
+                            end_state = None
+                            async for state in agent.resume_iter_from_state(
+                                current_state=resume_state,
+                                toolsets=toolsets,
+                                usage_limits=usage_limits,
+                                attacks=resume_attacks,
+                                instrument=instrument,
+                            ):
+                                await persist_state(state, resume_attacks)
+                                if isinstance(state, EndState):
+                                    end_state = state
+                                    break
+                        if not isinstance(end_state, EndState):
+                            raise RuntimeError(
+                                "Agent iteration completed without reaching EndState"
+                            )
+                        generated_attacks = resume_attacks or {}
+                    else:
+                        end_state, generated_attacks = await attack.attack(
+                            agent=agent,
+                            environment=environment,
+                            message_history=message_history,
+                            env_state=env_state,
+                            toolsets=toolsets,
+                            benign_task=couple.benign,
+                            malicious_task=couple.malicious,
+                            usage_limits=usage_limits or UsageLimits(),
+                            instrument=instrument,
+                            **attack_kwargs,
+                        )
 
                 result_ctx = end_state.run_ctx
 
@@ -591,11 +807,19 @@ async def run_task_couples_with_attack(
     concurrency_limiter = (
         asyncio.BoundedSemaphore(max_concurrency) if max_concurrency is not None else nullcontext()
     )
+    incomplete_run_ids: dict[str, list[str]] = {}
+    if persistence is not None:
+        incomplete_run_ids = {
+            couple.id: persistence.list_incomplete_run_ids(couple.id) for couple in couples
+        }
 
     async def run_couple(
         couple: TaskCouple[EnvStateT],
     ) -> CoupleExecutionResult[EnvStateT]:
         """Run couple and return result or error without propagating."""
+        resume_run_id = None
+        if incomplete_run_ids.get(couple.id):
+            resume_run_id = incomplete_run_ids[couple.id].pop(0)
         try:
             result = await _run_task_couple_with_attack(
                 couple,
@@ -608,6 +832,7 @@ async def run_task_couples_with_attack(
                 instrument,
                 attack,
                 persistence,
+                resume_run_id,
             )
             return ExecutionOk(couple, result)
         except (Exception, asyncio.CancelledError) as e:

@@ -9,7 +9,7 @@ import asyncio
 import sys
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic_ai.messages import ModelMessage
@@ -29,7 +29,12 @@ from prompt_siren.config.experiment_config import (
     ExperimentConfig,
 )
 from prompt_siren.job import Job
-from prompt_siren.job.models import ExceptionInfo, RunIndexEntry, TaskRunResult
+from prompt_siren.job.models import (
+    ExceptionInfo,
+    RunIndexEntry,
+    TaskRunResult,
+    TaskRunResumeState,
+)
 from prompt_siren.run import (
     run_single_tasks_without_attack,
     run_task_couples_with_attack,
@@ -45,7 +50,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.usage import UsageLimits
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from .conftest import (
     create_mock_benign_task,
@@ -181,6 +186,53 @@ class TestRunBenignTasks:
         task_dir = run_dirs[0]
         assert (task_dir / "result.json").exists()
         assert (task_dir / "execution.json").exists()
+
+    async def test_resume_partial_copies_to_new_run_dir(
+        self, mock_environment, mock_dataset: MockDataset, tmp_path
+    ):
+        """Test that partial resume preserves the source checkpoint by default."""
+        agent = PlainAgent(PlainAgentConfig(model=TestModel(), model_settings=ModelSettings()))
+        task = create_mock_benign_task("test_task", {"eval1": 1.0})
+        experiment_config = ExperimentConfig(
+            agent=AgentConfig(type="plain", config={"model": "test"}),
+            dataset=DatasetConfig(type="mock", config={}),
+        )
+        job = Job.create(
+            experiment_config=experiment_config,
+            execution_mode="benign",
+            jobs_dir=tmp_path,
+            job_name="test_job",
+            agent_name="test",
+        )
+        source_run_id, source_run_dir = job.persistence.create_task_run_dir(task.id)
+        job.persistence.save_partial_execution(
+            task_id=task.id,
+            run_id=source_run_id,
+            messages=[],
+            usage=RunUsage(),
+            task_span=MagicMock(get_span_context=lambda: None),
+            resume_state=TaskRunResumeState(
+                state_kind="model_request",
+                model_request=ModelRequest(parts=[UserPromptPart("continue")]),
+            ),
+        )
+
+        results = await run_single_tasks_without_attack(
+            tasks=[task],
+            agent=agent,
+            env=mock_environment,
+            system_prompt=None,
+            toolsets=mock_dataset.default_toolsets,
+            persistence=job.persistence,
+            instrument=False,
+        )
+
+        assert len(results) == 1
+        assert not (source_run_dir / "result.json").exists()
+        run_dirs = list((job.job_dir / "test_task").iterdir())
+        assert len(run_dirs) == 2
+        completed_dirs = [path for path in run_dirs if (path / "result.json").exists()]
+        assert len(completed_dirs) == 1
 
     async def test_run_benign_tasks_error_handling(
         self, mock_environment: MockEnvironment, mock_dataset: MockDataset

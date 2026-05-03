@@ -178,6 +178,90 @@ class TemplateStringAttack(
 
         return state, attacks
 
+    async def resume_attack_from_state(
+        self,
+        agent: AbstractAgent,
+        environment: AbstractEnvironment[EnvStateT, str, str, StrContentAttack],
+        current_state: ExecutionState[EnvStateT, str, str, StrContentAttack],
+        toolsets: Sequence[AbstractToolset[EnvStateT]],
+        benign_task: BenignTask[EnvStateT],
+        malicious_task: MaliciousTask[EnvStateT],
+        usage_limits: UsageLimits,
+        attacks: Mapping[str, StrContentAttack] | None = None,
+        instrument: InstrumentationSettings | bool | None = None,
+        state_callback: Callable[
+            [
+                ExecutionState[EnvStateT, str, str, StrContentAttack],
+                Mapping[str, StrContentAttack] | None,
+            ],
+            Awaitable[None],
+        ]
+        | None = None,
+    ) -> tuple[
+        EndState[EnvStateT, str, str, StrContentAttack],
+        InjectionAttacksDict[StrContentAttack],
+    ]:
+        """Continue a template-string attack from a saved agent state."""
+        generated_attacks: InjectionAttacksDict[StrContentAttack] = dict(attacks or {})
+        state = current_state
+
+        while not isinstance(state, EndState):
+            state = await run_until_injectable(
+                agent,
+                state,
+                toolsets=toolsets,
+                usage_limits=usage_limits,
+                instrument=instrument,
+                state_callback=state_callback,
+            )
+            if isinstance(state, EndState):
+                return state, generated_attacks
+
+            for part in state.injectable_model_request_parts:
+                if not is_injectable_model_request_part(part):
+                    continue
+                for vector_id in part.vector_ids:
+                    if vector_id in generated_attacks:
+                        continue
+
+                    env = Environment(undefined=StrictUndefined)
+                    template = env.from_string(self.config.attack_template)
+                    template_context = {
+                        "goal": malicious_task.goal,
+                        **self.config.template_fields,
+                    }
+                    if "model" not in template_context:
+                        template_context["model"] = _get_model_name(agent.get_agent_name())
+
+                    try:
+                        injection = template.render(**template_context)
+                    except TemplateSyntaxError as e:
+                        logfire.error(
+                            "Jinja2 template syntax error",
+                            error=str(e),
+                            template=self.config.attack_template,
+                        )
+                        raise
+
+                    logfire.info(
+                        "creating injection",
+                        injection=injection,
+                        template_short_name=self.config.template_short_name,
+                    )
+                    generated_attacks[vector_id] = StrContentAttack(content=injection)
+
+            state = await agent.next_state(
+                current_state=state,
+                toolsets=toolsets,
+                usage_limits=usage_limits,
+                attacks=generated_attacks,
+                instrument=instrument,
+            )
+            if state_callback is not None:
+                await state_callback(state, generated_attacks)
+
+        return state, generated_attacks
+
 
 def create_template_string_attack(
     config: TemplateStringAttackConfig, context: None = None

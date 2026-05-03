@@ -232,10 +232,24 @@ def start_attack(
     help="Retry tasks that failed with this error type (can be used multiple times). "
     "Use -e '' to disable retries.",
 )
+@click.option(
+    "--resume-partial/--restart-partial",
+    default=True,
+    show_default=True,
+    help="Continue incomplete runs from execution.json checkpoints when possible.",
+)
+@click.option(
+    "--copy-partial/--resume-in-place",
+    default=True,
+    show_default=True,
+    help="Write partial resumes to a new run directory instead of overwriting the checkpoint.",
+)
 @click.argument("overrides", nargs=-1)
 def resume(
     job_path: Path,
     retry_on_error: tuple[str, ...],
+    resume_partial: bool,
+    copy_partial: bool,
     overrides: tuple[str, ...],
 ):
     """Resume an existing job from its job directory.
@@ -264,6 +278,8 @@ def resume(
             job_dir=job_path,
             overrides=list(overrides) if overrides else None,
             retry_on_errors=retry_errors,
+            resume_partial=resume_partial,
+            resume_partial_in_place=not copy_partial,
         )
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)

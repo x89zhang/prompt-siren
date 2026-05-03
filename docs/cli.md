@@ -95,12 +95,23 @@ prompt-siren jobs resume -p ./jobs/my-job
 ```
 
 The command loads the original configuration, skips completed tasks, and continues with remaining ones.
+If an incomplete run has an `execution.json` checkpoint but no `result.json`, `jobs resume`
+continues that run from the saved state when possible. Use `--restart-partial` to discard
+incomplete checkpoints and restart those runs from the beginning.
+By default, resumed partial runs are written to a new run directory so the original
+interrupted `execution.json` is preserved. Use `--resume-in-place` to overwrite the
+original run directory instead.
 
 ### Options
 
 ```bash
 -p, --job-path PATH        Path to job directory (required)
 -e, --retry-on-error TYPE  Retry tasks that failed with this error (repeatable, default: CancelledError)
+--resume-partial / --restart-partial
+                            Continue incomplete runs from execution.json checkpoints when possible
+--copy-partial / --resume-in-place
+                            Write partial resumes to a new run directory instead of overwriting
+                            the checkpoint
 ```
 
 ### Default Behavior
@@ -127,6 +138,12 @@ prompt-siren jobs resume -p ./jobs/my-job -e TimeoutError
 
 # Disable all retries (only continue incomplete tasks)
 prompt-siren jobs resume -p ./jobs/my-job -e ''
+
+# Restart incomplete runs instead of continuing from execution.json checkpoints
+prompt-siren jobs resume -p ./jobs/my-job --restart-partial
+
+# Continue from a checkpoint but overwrite the original incomplete run directory
+prompt-siren jobs resume -p ./jobs/my-job --resume-in-place
 
 # Resume with higher concurrency
 prompt-siren jobs resume -p ./jobs/my-job execution.concurrency=16

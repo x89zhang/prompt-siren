@@ -137,6 +137,27 @@ class TestJobsResumeCommand:
         mock_resume.assert_called_once()
         call_kwargs = mock_resume.call_args.kwargs
         assert call_kwargs.get("retry_on_errors") == ["CancelledError"]
+        assert call_kwargs.get("resume_partial_in_place") is False
+
+    def test_resume_in_place_flag(
+        self, cli_runner: CliRunner, mock_job_config: JobConfig, tmp_path: Path
+    ):
+        """Test that --resume-in-place writes resumed partials to the source run dir."""
+        job_dir = tmp_path / "test_job"
+        job_dir.mkdir()
+        _save_config_yaml(job_dir / "config.yaml", mock_job_config)
+
+        with patch("prompt_siren.cli.run_benign_experiment", AsyncMock(return_value={})):
+            with patch.object(Job, "resume", wraps=Job.resume) as mock_resume:
+                result = cli_runner.invoke(
+                    main,
+                    ["jobs", "resume", "-p", str(job_dir), "--resume-in-place"],
+                )
+
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        mock_resume.assert_called_once()
+        call_kwargs = mock_resume.call_args.kwargs
+        assert call_kwargs.get("resume_partial_in_place") is True
 
     def test_resume_empty_string_disables_retries(
         self, cli_runner: CliRunner, mock_job_config: JobConfig, tmp_path: Path

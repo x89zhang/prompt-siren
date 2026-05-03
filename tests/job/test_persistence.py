@@ -18,7 +18,9 @@ from prompt_siren.job.models import (
     INDEX_FILENAME,
     JobConfig,
     TASK_RESULT_FILENAME,
+    TaskRunExecution,
     TaskRunResult,
+    TaskRunResumeState,
 )
 from prompt_siren.job.persistence import (
     _save_config_yaml,
@@ -32,7 +34,13 @@ from prompt_siren.tasks import (
     TaskCouple,
     TaskResult,
 )
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
 from pydantic_ai.usage import RunUsage
 
 
@@ -178,6 +186,60 @@ class TestSaveCoupleRun:
         loaded = TaskRunResult.model_validate_json((run_dir / TASK_RESULT_FILENAME).read_text())
         assert loaded.benign_score == 0.9
         assert loaded.attack_score == 0.3
+
+
+class TestSavePartialExecution:
+    """Tests for partial execution checkpoints."""
+
+    def test_saves_resume_state_without_result_or_index(
+        self, job_persistence: JobPersistence, mock_task_span: MagicMock
+    ):
+        run_id, run_dir = job_persistence.create_task_run_dir("task1")
+        resume_state = TaskRunResumeState(
+            state_kind="model_request",
+            model_request=ModelRequest(parts=[UserPromptPart("continue")]),
+        )
+
+        job_persistence.save_partial_execution(
+            task_id="task1",
+            run_id=run_id,
+            messages=[],
+            usage=RunUsage(),
+            task_span=mock_task_span,
+            resume_state=resume_state,
+        )
+
+        execution = TaskRunExecution.model_validate_json(
+            (run_dir / "execution.json").read_text()
+        )
+        assert execution.resume_state is not None
+        assert execution.resume_state.state_kind == "model_request"
+        assert not (run_dir / TASK_RESULT_FILENAME).exists()
+        assert not (job_persistence.job_dir / INDEX_FILENAME).exists()
+
+    def test_lists_incomplete_run_ids_with_execution_only(
+        self, job_persistence: JobPersistence, mock_task_span: MagicMock
+    ):
+        incomplete_id, _ = job_persistence.create_task_run_dir("task1")
+        job_persistence.save_partial_execution(
+            task_id="task1",
+            run_id=incomplete_id,
+            messages=[],
+            usage=RunUsage(),
+            task_span=mock_task_span,
+        )
+
+        complete_task = BenignTask(id="task1", prompt="test", evaluators={})
+        job_persistence.save_task_run(
+            task=complete_task,
+            evaluation=EvaluationResult(task_id="task1", results={}),
+            messages=[],
+            usage=RunUsage(),
+            task_span=mock_task_span,
+            started_at=datetime.now(),
+        )
+
+        assert job_persistence.list_incomplete_run_ids("task1") == [incomplete_id]
 
 
 class TestLoadIndex:

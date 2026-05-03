@@ -6,14 +6,14 @@ from __future__ import annotations
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelRequestPart
 from pydantic_ai.usage import RunUsage
 
 from ..config.experiment_config import ExperimentConfig
-from ..types import ExecutionMode
+from ..types import ExecutionMode, InjectableModelRequestPart
 
 
 class ExceptionInfo(BaseModel):
@@ -62,6 +62,17 @@ class TaskRunExecution(BaseModel):
     messages: list[ModelMessage]
     usage: RunUsage
     attacks: dict[str, Any] | None = None  # Generated attacks
+    resume_state: TaskRunResumeState | None = None
+
+
+class TaskRunResumeState(BaseModel):
+    """Serializable state-machine checkpoint for resuming an in-progress run."""
+
+    state_kind: Literal["model_request", "injectable_model_request", "model_response", "end"]
+    model_request: ModelRequest | None = None
+    injectable_model_request_parts: list[ModelRequestPart | InjectableModelRequestPart] | None = (
+        None
+    )
 
 
 class JobConfig(ExperimentConfig):
