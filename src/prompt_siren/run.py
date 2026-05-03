@@ -37,6 +37,7 @@ from .attacks.abstract import AbstractAttack
 from .environments.abstract import AbstractEnvironment
 from .job import JobPersistence
 from .job.models import TaskRunExecution, TaskRunResumeState
+from .providers import infer_model
 from .tasks import (
     BenignTask,
     EvaluationResult,
@@ -47,6 +48,7 @@ from .tasks import (
 )
 from .telemetry.formatted_span import formatted_span
 from .telemetry.workbench_spans import create_attack_span, create_task_span
+from .trajectory_labeling import label_trajectory_async, TrajectoryLabels
 from .types import InjectionAttack, InjectionAttacksDictTypeAdapter
 
 EntityT = TypeVar("EntityT")
@@ -145,6 +147,71 @@ def _calculate_evaluation_score(evaluation_result: EvaluationResult) -> float:
     if not evaluation_result.results:
         return 0.0
     return sum(evaluation_result.results.values()) / len(evaluation_result.results)
+
+
+def _labeling_model_for_agent(agent: AbstractAgent) -> tuple[object | None, object | None]:
+    config = getattr(agent, "config", None)
+    if config is not None and hasattr(config, "model"):
+        return config.model, getattr(config, "model_settings", None)
+
+    mini_config = getattr(agent, "_mini_config", None)
+    if isinstance(mini_config, dict):
+        model_config = mini_config.get("model", {})
+        if isinstance(model_config, dict):
+            model_name = model_config.get("model_name") or model_config.get("model")
+            if isinstance(model_name, str) and model_name:
+                return infer_model(_normalize_model_name_for_pydantic_ai(model_name)), None
+
+    return None, None
+
+
+def _normalize_model_name_for_pydantic_ai(model_name: str) -> str:
+    """Convert common LiteLLM-style model names to PydanticAI model names."""
+    if ":" in model_name or "/" not in model_name:
+        return model_name
+
+    provider, name = model_name.split("/", 1)
+    if provider in {"openai", "anthropic", "google", "groq", "mistral", "cohere"}:
+        return f"{provider}:{name}"
+
+    return model_name
+
+
+async def _label_trajectory_for_result(
+    *,
+    task_id: str,
+    messages: Sequence[ModelMessage],
+    agent: AbstractAgent,
+    persistence: JobPersistence | None,
+    generated_attacks: Mapping[str, InjectionAttack] | None,
+    attack_score: float | None,
+) -> TrajectoryLabels | None:
+    if persistence is None:
+        return None
+
+    try:
+        labeling_config = persistence.job_config.trajectory_labeling
+        judge_model = None
+        judge_model_settings = None
+        if labeling_config.l2_judge_enabled:
+            judge_model, judge_model_settings = _labeling_model_for_agent(agent)
+
+        labels = await label_trajectory_async(
+            messages,
+            attacks=generated_attacks,
+            attack_score=attack_score,
+            l2_judge_model=judge_model,
+            l2_judge_model_settings=judge_model_settings,
+            l2_threshold=labeling_config.l2_threshold,
+            l3_pattern_model=judge_model,
+            l3_pattern_model_settings=judge_model_settings,
+            task_id=task_id,
+        )
+    except Exception as e:
+        logfire.error(f"Failed to label trajectory; falling back to persistence labeling: {e}")
+        return None
+
+    return labels
 
 
 def _log_single_task_result(
@@ -434,6 +501,14 @@ async def _run_single_task_without_attack(
                 _log_single_task_result(evaluation, result_ctx, task_span)
 
                 if persistence:
+                    trajectory_labels = await _label_trajectory_for_result(
+                        task_id=task.id,
+                        messages=list(result_ctx.messages),
+                        agent=agent,
+                        persistence=persistence,
+                        generated_attacks=None,
+                        attack_score=None,
+                    )
                     persistence.save_task_run(
                         task=task,
                         evaluation=evaluation,
@@ -441,6 +516,10 @@ async def _run_single_task_without_attack(
                         usage=result_ctx.usage,
                         task_span=task_span,
                         started_at=started_at,
+                        trajectory_level=(
+                            trajectory_labels.trajectory_level if trajectory_labels else None
+                        ),
+                        trajectory_labels=trajectory_labels,
                         run_id=run_id,
                     )
 
@@ -739,6 +818,15 @@ async def _run_task_couple_with_attack(
                 _log_couple_result(benign_eval, malicious_eval, result_ctx, task_span)
 
                 if persistence:
+                    malicious_score = _calculate_evaluation_score(malicious_eval)
+                    trajectory_labels = await _label_trajectory_for_result(
+                        task_id=couple.id,
+                        messages=list(result_ctx.messages),
+                        agent=agent,
+                        persistence=persistence,
+                        generated_attacks=generated_attacks,
+                        attack_score=malicious_score,
+                    )
                     persistence.save_couple_run(
                         couple=couple,
                         benign_eval=benign_eval,
@@ -748,6 +836,10 @@ async def _run_task_couple_with_attack(
                         task_span=task_span,
                         started_at=started_at,
                         generated_attacks=generated_attacks,
+                        trajectory_level=(
+                            trajectory_labels.trajectory_level if trajectory_labels else None
+                        ),
+                        trajectory_labels=trajectory_labels,
                         run_id=run_id,
                     )
 

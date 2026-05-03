@@ -63,6 +63,7 @@ class TaskRunExecution(BaseModel):
     messages: list[ModelMessage]
     usage: RunUsage
     attacks: dict[str, Any] | None = None  # Generated attacks
+    trajectory_labels: dict[str, Any] | None = None
     resume_state: TaskRunResumeState | None = None
 
 

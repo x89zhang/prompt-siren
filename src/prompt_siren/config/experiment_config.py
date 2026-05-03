@@ -51,6 +51,21 @@ class ExecutionConfig(BaseModel):
     concurrency: int = Field(default=1, description="Maximum number of tasks to run concurrently")
 
 
+class TrajectoryLabelingConfig(BaseModel):
+    """Configuration for trajectory uptake labeling."""
+
+    l2_judge_enabled: bool = Field(
+        default=True,
+        description="Use the agent model as an LLM judge for L2 verbal uptake.",
+    )
+    l2_threshold: float = Field(
+        default=7.0,
+        ge=1.0,
+        le=10.0,
+        description="Minimum LLM judge score required to label a message as L2.",
+    )
+
+
 class OutputConfig(BaseModel):
     """Configuration for experiment output."""
 
@@ -95,6 +110,10 @@ class ExperimentConfig(BaseModel):
     # Execution settings
     execution: ExecutionConfig = Field(
         default_factory=ExecutionConfig, description="Execution configuration"
+    )
+    trajectory_labeling: TrajectoryLabelingConfig = Field(
+        default_factory=TrajectoryLabelingConfig,
+        description="Trajectory uptake labeling configuration",
     )
     task_ids: list[str] | None = Field(
         default=None,

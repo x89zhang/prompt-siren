@@ -41,6 +41,13 @@ execution:
   concurrency: 1 # Number of concurrent tasks (1-4 recommended)
 
 # =============================================================================
+# TRAJECTORY LABELING
+# =============================================================================
+trajectory_labeling:
+  l2_judge_enabled: true # Use the agent model as an LLM judge for L2 verbal uptake
+  l2_threshold: 7.0 # LLM judge score >= threshold is labeled L2
+
+# =============================================================================
 # TASK SELECTION
 # =============================================================================
 task_ids: null # Task IDs to run (null = all tasks appropriate for mode)

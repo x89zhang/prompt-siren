@@ -17,7 +17,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import RunUsage
 
 from ..tasks import EvaluationResult, Task, TaskCouple
-from ..trajectory_labeling import label_trajectory
+from ..trajectory_labeling import label_trajectory, TrajectoryLabels, UptakeLevel
 from ..types import InjectionAttack, InjectionAttacksDictTypeAdapter
 from .models import (
     CONFIG_FILENAME,
@@ -180,6 +180,8 @@ class JobPersistence:
         exception: BaseException | None = None,
         generated_attacks: Mapping[str, InjectionAttack] | None = None,
         attack_score: float | None = None,
+        trajectory_level: UptakeLevel | None = None,
+        trajectory_labels: TrajectoryLabels | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Save a single task run result and execution data.
@@ -226,11 +228,14 @@ class JobPersistence:
         if generated_attacks:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
-        trajectory_labels = label_trajectory(
-            messages,
-            attacks=attacks_dict,
-            attack_score=attack_score,
-        )
+        if trajectory_labels is None:
+            trajectory_labels = label_trajectory(
+                messages,
+                attacks=attacks_dict,
+                attack_score=attack_score,
+            )
+        if trajectory_level is None:
+            trajectory_level = trajectory_labels.trajectory_level
 
         # Save result.json (lightweight)
         result = TaskRunResult(
@@ -240,7 +245,7 @@ class JobPersistence:
             finished_at=now,
             benign_score=benign_score,
             attack_score=attack_score,
-            trajectory_level=trajectory_labels.trajectory_level,
+            trajectory_level=trajectory_level,
             exception_info=exception_info,
         )
         result_path = run_dir / TASK_RESULT_FILENAME
@@ -258,6 +263,7 @@ class JobPersistence:
             messages=messages,
             usage=usage,
             attacks=attacks_dict,
+            trajectory_labels=trajectory_labels.to_json(),
         )
         execution_path = run_dir / TASK_EXECUTION_FILENAME
         with open(execution_path, "w") as f:
@@ -287,6 +293,8 @@ class JobPersistence:
         started_at: datetime,
         exception: BaseException | None = None,
         generated_attacks: Mapping[str, InjectionAttack] | None = None,
+        trajectory_level: UptakeLevel | None = None,
+        trajectory_labels: TrajectoryLabels | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Save a task couple run result and execution data.
@@ -338,11 +346,14 @@ class JobPersistence:
         if generated_attacks:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
-        trajectory_labels = label_trajectory(
-            messages,
-            attacks=attacks_dict,
-            attack_score=attack_score,
-        )
+        if trajectory_labels is None:
+            trajectory_labels = label_trajectory(
+                messages,
+                attacks=attacks_dict,
+                attack_score=attack_score,
+            )
+        if trajectory_level is None:
+            trajectory_level = trajectory_labels.trajectory_level
 
         # Save result.json (lightweight)
         result = TaskRunResult(
@@ -352,7 +363,7 @@ class JobPersistence:
             finished_at=now,
             benign_score=benign_score,
             attack_score=attack_score,
-            trajectory_level=trajectory_labels.trajectory_level,
+            trajectory_level=trajectory_level,
             exception_info=exception_info,
         )
         result_path = run_dir / TASK_RESULT_FILENAME
@@ -370,6 +381,7 @@ class JobPersistence:
             messages=messages,
             usage=usage,
             attacks=attacks_dict,
+            trajectory_labels=trajectory_labels.to_json(),
         )
         execution_path = run_dir / TASK_EXECUTION_FILENAME
         with open(execution_path, "w") as f:

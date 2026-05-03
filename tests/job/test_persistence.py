@@ -125,6 +125,11 @@ class TestSaveTaskRun:
         assert loaded.benign_score == 0.85
         assert loaded.trajectory_level == "L0"
 
+        execution = job_persistence.load_execution("task1", loaded.run_id)
+        assert execution.trajectory_labels is not None
+        assert execution.trajectory_labels["trajectory_level"] == "L0"
+        assert execution.trajectory_labels["messages"][0]["message_level"] == "L0"
+
     def test_appends_entry_to_index(
         self, job_persistence: JobPersistence, mock_task_span: MagicMock
     ):
@@ -188,6 +193,11 @@ class TestSaveCoupleRun:
         assert loaded.benign_score == 0.9
         assert loaded.attack_score == 0.3
         assert loaded.trajectory_level == "L4"
+
+        execution = job_persistence.load_execution(couple.id, loaded.run_id)
+        assert execution.trajectory_labels is not None
+        assert execution.trajectory_labels["trajectory_level"] == "L4"
+        assert execution.trajectory_labels["messages"][-1]["message_level"] == "L4"
 
 
 class TestSavePartialExecution:
