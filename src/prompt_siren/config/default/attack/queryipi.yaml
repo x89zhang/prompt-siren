@@ -1,6 +1,6 @@
 type: queryipi
 config:
-  attacker_model: qwen3.6-35b
+  attacker_model: auto
   attacker_model_base_url: http://localhost:8000/v1
   attacker_model_api_key: EMPTY
   agent_system_prompt: |

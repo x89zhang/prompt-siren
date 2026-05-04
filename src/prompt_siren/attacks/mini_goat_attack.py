@@ -174,6 +174,9 @@ class MiniGoatAttack(
     def _make_attacker_model(self) -> GoatAttackerModel:
         return GoatAttackerModel(self.config)
 
+    def _make_attacker_model_for_agent(self, agent_name: str) -> GoatAttackerModel:
+        return self._make_attacker_model()
+
     async def _generate_injection(
         self,
         attacker_model_instance: GoatAttackerModel,
@@ -200,7 +203,7 @@ class MiniGoatAttack(
     ) -> ModelResponseState[EnvStateT, str, str, StrContentAttack]:
         """Advance from InjectableModelRequestState to ModelResponseState with attacks applied."""
         # Move to model request state
-        next_state = await agent.next_state(
+        current_state = await agent.next_state(
             current_state=state,
             toolsets=toolsets,
             usage_limits=usage_limits,
@@ -208,24 +211,37 @@ class MiniGoatAttack(
             instrument=instrument,
         )
 
-        if not isinstance(next_state, ModelRequestState):
-            raise ValueError(f"Expected ModelRequestState after injection, got {type(next_state)}.")
-
-        # Move to model response state
-        response_state = await agent.next_state(
-            current_state=next_state,
-            toolsets=toolsets,
-            usage_limits=usage_limits,
-            attacks=attacks,
-            instrument=instrument,
-        )
-
-        if not isinstance(response_state, ModelResponseState):
+        if not isinstance(current_state, ModelRequestState):
             raise ValueError(
-                f"Expected ModelResponseState after injection, got {type(response_state)}."
+                f"Expected ModelRequestState after injection, got {type(current_state)}."
             )
 
-        return response_state
+        # Some agents, especially mini-swe with text-based parsers, may emit
+        # intermediate retry requests before producing a parsed model response.
+        for _ in range(10):
+            next_state = await agent.next_state(
+                current_state=current_state,
+                toolsets=toolsets,
+                usage_limits=usage_limits,
+                attacks=attacks,
+                instrument=instrument,
+            )
+
+            if isinstance(next_state, ModelResponseState):
+                return next_state
+
+            if isinstance(next_state, EndState):
+                raise ValueError("Agent reached EndState while testing an injection candidate.")
+
+            if isinstance(next_state, InjectableModelRequestState):
+                raise ValueError(
+                    "Agent reached another InjectableModelRequestState while testing an injection "
+                    "candidate."
+                )
+
+            current_state = next_state
+
+        raise ValueError("Expected ModelResponseState after injection, exceeded 10 state advances.")
 
     async def _rollback_to_injectable(
         self,
@@ -234,23 +250,17 @@ class MiniGoatAttack(
         toolsets: Sequence[AbstractToolset[EnvStateT]],
     ) -> InjectableModelRequestState[EnvStateT, str, str, StrContentAttack]:
         """Rollback from ModelResponseState to InjectableModelRequestState."""
-        # Roll back to model request state
-        prev_state = await agent.prev_state(current_state=state, toolsets=toolsets)
+        current_state: ExecutionState[EnvStateT, str, str, StrContentAttack] = state
 
-        if not isinstance(prev_state, ModelRequestState):
-            raise ValueError(
-                f"Expected ModelRequestState when rolling back, got {type(prev_state)}."
-            )
+        for _ in range(20):
+            prev_state = await agent.prev_state(current_state=current_state, toolsets=toolsets)
 
-        # Roll back to injectable state
-        injectable_state = await agent.prev_state(current_state=prev_state, toolsets=toolsets)
+            if isinstance(prev_state, InjectableModelRequestState):
+                return prev_state
 
-        if not isinstance(injectable_state, InjectableModelRequestState):
-            raise ValueError(
-                f"Expected InjectableModelRequestState when rolling back, got {type(injectable_state)}."
-            )
+            current_state = prev_state
 
-        return injectable_state
+        raise ValueError("Expected InjectableModelRequestState when rolling back, exceeded 20 steps.")
 
     async def attack(
         self,
@@ -276,7 +286,7 @@ class MiniGoatAttack(
         InjectionAttacksDict[StrContentAttack],
     ]:
         attacks: InjectionAttacksDict[StrContentAttack] = {}
-        attacker_model_instance = self._make_attacker_model()
+        attacker_model_instance = self._make_attacker_model_for_agent(agent.get_agent_name())
 
         state = agent.create_initial_request_state(
             environment,

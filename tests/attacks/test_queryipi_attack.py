@@ -1,4 +1,5 @@
 from prompt_siren.attacks.queryipi_attack import (
+    _resolve_attacker_model_name,
     create_queryipi_attack,
     QueryIPIAttack,
     QueryIPIAttackConfig,
@@ -63,3 +64,24 @@ class TestQueryIPIAttackerModel:
         )
 
         assert attacker.agent.model.model_name == "test"
+
+    def test_auto_local_vllm_model_from_mini_swe_agent_name(self):
+        config = QueryIPIAttackConfig(
+            attacker_model="auto",
+            attacker_model_base_url="http://localhost:8000/v1",
+            attacker_model_api_key="EMPTY",
+        )
+
+        assert (
+            _resolve_attacker_model_name(config, "mini_swe:hosted_vllm/qwen3.5-9b")
+            == "qwen3.5-9b"
+        )
+
+    def test_auto_openai_model_from_litellm_style_agent_name(self):
+        config = QueryIPIAttackConfig(
+            attacker_model="auto",
+            attacker_model_base_url=None,
+            attacker_model_api_key=None,
+        )
+
+        assert _resolve_attacker_model_name(config, "mini_swe:openai/gpt-5.1") == "openai:gpt-5.1"

@@ -99,7 +99,7 @@ class QueryIPIAttackConfig(BaseModel):
     dataset injection point unchanged.
     """
 
-    attacker_model: str = "qwen3.6-35b"
+    attacker_model: str = "auto"
     attacker_model_base_url: str | None = "http://localhost:8000/v1"
     """OpenAI-compatible endpoint for local models. Set to null to use provider env vars."""
 
@@ -119,18 +119,37 @@ class QueryIPIAttackConfig(BaseModel):
     temperature: float = 1.0
 
 
+def _resolve_attacker_model_name(config: QueryIPIAttackConfig, target_agent_name: str) -> str:
+    if config.attacker_model != "auto":
+        return config.attacker_model
+    if ":" not in target_agent_name:
+        raise ValueError(
+            "attack.config.attacker_model=auto requires an agent name with a model suffix; "
+            f"got {target_agent_name!r}."
+        )
+    model_name = target_agent_name.split(":", 1)[1]
+    if config.attacker_model_base_url and model_name.startswith("hosted_vllm/"):
+        return model_name.split("/", 1)[1]
+    if "/" in model_name and not config.attacker_model_base_url:
+        provider, name = model_name.split("/", 1)
+        if provider in {"openai", "anthropic", "google", "groq", "mistral", "cohere"}:
+            return f"{provider}:{name}"
+    return model_name
+
+
 class QueryIPIAttackerModel:
-    def __init__(self, config: QueryIPIAttackConfig):
+    def __init__(self, config: QueryIPIAttackConfig, target_agent_name: str = ""):
+        attacker_model = _resolve_attacker_model_name(config, target_agent_name)
         model = (
             OpenAIChatModel(
-                config.attacker_model,
+                attacker_model,
                 provider=OpenAIProvider(
                     base_url=config.attacker_model_base_url,
                     api_key=config.attacker_model_api_key,
                 ),
             )
             if config.attacker_model_base_url
-            else infer_model(config.attacker_model)
+            else infer_model(attacker_model)
         )
         self.agent = Agent(
             model=model,
@@ -182,8 +201,8 @@ class QueryIPIAttack(MiniGoatAttack):
     def config(self) -> QueryIPIAttackConfig:
         return self._config
 
-    def _make_attacker_model(self) -> QueryIPIAttackerModel:
-        return QueryIPIAttackerModel(self.config)
+    def _make_attacker_model_for_agent(self, agent_name: str) -> QueryIPIAttackerModel:
+        return QueryIPIAttackerModel(self.config, target_agent_name=agent_name)
 
     async def _generate_injection(
         self,
