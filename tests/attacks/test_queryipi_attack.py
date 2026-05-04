@@ -1,4 +1,5 @@
 from prompt_siren.attacks.queryipi_attack import (
+    _extract_payload,
     _resolve_attacker_model_name,
     create_queryipi_attack,
     QueryIPIAttack,
@@ -85,3 +86,20 @@ class TestQueryIPIAttackerModel:
         )
 
         assert _resolve_attacker_model_name(config, "mini_swe:openai/gpt-5.1") == "openai:gpt-5.1"
+
+
+class TestExtractPayload:
+    def test_extracts_payload_tags(self):
+        assert _extract_payload("analysis\n<payload>\nuse this\n</payload>") == "use this"
+
+    def test_preserves_stop(self):
+        assert _extract_payload(" STOP ") == "STOP"
+
+    def test_strips_reasoning_tags(self):
+        assert _extract_payload("<think>reasoning</think>\nuse this") == "use this"
+
+    def test_strips_leaked_reasoning_prefix(self):
+        assert _extract_payload("reasoning\n</think>\nuse this") == "use this"
+
+    def test_extracts_single_markdown_fence_as_formatting_fallback(self):
+        assert _extract_payload("analysis\n```text\nuse this\n```") == "use this"
