@@ -171,6 +171,24 @@ class MiniGoatAttack(
 
         return part.vector_ids[0]
 
+    def _make_attacker_model(self) -> GoatAttackerModel:
+        return GoatAttackerModel(self.config)
+
+    async def _generate_injection(
+        self,
+        attacker_model_instance: GoatAttackerModel,
+        agent_name: str,
+        benign_task: BenignTask[EnvStateT],
+        malicious_task: MaliciousTask[EnvStateT],
+        last_target_response: str | None,
+        last_attacker_result: AgentRunResult[str] | None,
+    ) -> tuple[str, AgentRunResult[str]]:
+        return await attacker_model_instance.generate_injection(
+            attacker_goal=malicious_task.goal,
+            last_target_response=last_target_response,
+            previous_messages=last_attacker_result.all_messages() if last_attacker_result else None,
+        )
+
     async def _advance_with_attack(
         self,
         agent: AbstractAgent,
@@ -258,7 +276,7 @@ class MiniGoatAttack(
         InjectionAttacksDict[StrContentAttack],
     ]:
         attacks: InjectionAttacksDict[StrContentAttack] = {}
-        attacker_model_instance = GoatAttackerModel(self.config)
+        attacker_model_instance = self._make_attacker_model()
 
         state = agent.create_initial_request_state(
             environment,
@@ -291,12 +309,13 @@ class MiniGoatAttack(
                 (
                     injection,
                     last_attacker_result,
-                ) = await attacker_model_instance.generate_injection(
-                    attacker_goal=malicious_task.goal,
+                ) = await self._generate_injection(
+                    attacker_model_instance,
+                    agent.get_agent_name(),
+                    benign_task,
+                    malicious_task,
                     last_target_response=last_target_response,
-                    previous_messages=last_attacker_result.all_messages()
-                    if last_attacker_result
-                    else None,
+                    last_attacker_result=last_attacker_result,
                 )
 
                 if injection == "STOP":

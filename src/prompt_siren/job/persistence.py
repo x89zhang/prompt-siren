@@ -259,6 +259,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            attacks=attacks_dict,
             exception_info=exception_info,
         )
         result_path = run_dir / TASK_RESULT_FILENAME
@@ -377,6 +378,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            attacks=attacks_dict,
             exception_info=exception_info,
         )
         result_path = run_dir / TASK_RESULT_FILENAME
