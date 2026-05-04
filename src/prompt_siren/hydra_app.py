@@ -11,6 +11,7 @@ from pydantic_ai.exceptions import UserError
 
 from .agents.registry import get_agent_config_class
 from .attacks.registry import get_attack_config_class
+from .build_images import ImageBuilder
 from .config.exceptions import ConfigValidationError
 from .config.experiment_config import ExperimentConfig
 from .config.registry_bridge import (
@@ -19,10 +20,15 @@ from .config.registry_bridge import (
     create_dataset_from_config,
     create_sandbox_manager_from_config,
 )
+from .datasets import get_image_build_specs
 from .datasets.registry import get_dataset_config_class
 from .job import Job
 from .registry_base import UnknownComponentError
 from .run import run_single_tasks_without_attack, run_task_couples_with_attack
+from .sandbox_managers.docker.manager import create_docker_client_from_config
+from .sandbox_managers.docker.plugins import AbstractDockerClient, DockerClientError
+from .sandbox_managers.image_spec import ImageBuildSpec, MultiStageBuildImageSpec, PullImageSpec
+from .sandbox_managers.registry import get_sandbox_config_class
 from .telemetry import setup_telemetry
 from .telemetry.formatted_span import formatted_span
 from .types import ExecutionMode
@@ -33,6 +39,122 @@ class _RunnableEntity(Protocol):
 
 
 RunnableEntityT = TypeVar("RunnableEntityT", bound=_RunnableEntity)
+
+
+def _image_build_spec_tag(spec: ImageBuildSpec) -> str:
+    if isinstance(spec, MultiStageBuildImageSpec):
+        return spec.final_tag
+    return spec.tag
+
+
+def _add_pull_image_tag(image_spec: object, tags: set[str]) -> None:
+    if isinstance(image_spec, PullImageSpec):
+        tags.add(image_spec.tag)
+
+
+def _get_required_swebench_image_tags(selected_couples: list[_RunnableEntity]) -> set[str]:
+    tags: set[str] = set()
+    for couple in selected_couples:
+        benign_meta = getattr(getattr(couple, "benign", None), "metadata", None)
+        malicious_meta = getattr(getattr(couple, "malicious", None), "metadata", None)
+        benign_id = getattr(getattr(couple, "benign", None), "id", None)
+        malicious_id = getattr(getattr(couple, "malicious", None), "id", None)
+
+        benign_agent_spec = getattr(benign_meta, "agent_container_spec", None)
+        if benign_agent_spec is not None:
+            _add_pull_image_tag(getattr(benign_agent_spec, "image_spec", None), tags)
+
+        if benign_id is not None and malicious_id is not None and malicious_meta is not None:
+            get_pair_image_tag = getattr(malicious_meta, "get_pair_image_tag", None)
+            if callable(get_pair_image_tag):
+                pair_tag = get_pair_image_tag(benign_id, malicious_id)
+                if pair_tag is not None:
+                    tags.add(pair_tag)
+
+        for metadata in (benign_meta, malicious_meta):
+            service_containers = getattr(metadata, "service_containers", {})
+            for spec in service_containers.values():
+                _add_pull_image_tag(getattr(spec, "image_spec", None), tags)
+
+    return tags
+
+
+async def _docker_image_exists(docker: AbstractDockerClient, tag: str) -> bool:
+    try:
+        await docker.inspect_image(tag)
+        return True
+    except DockerClientError as e:
+        if e.status == 404:
+            return False
+        raise
+
+
+async def _ensure_local_swebench_images(
+    experiment_config: ExperimentConfig,
+    selected_couples: list[_RunnableEntity],
+) -> None:
+    """Build missing local SWE-bench images for the selected attack couples."""
+    if experiment_config.dataset.type != "swebench":
+        return
+    if experiment_config.dataset.config.get("registry") is not None:
+        return
+    if experiment_config.sandbox_manager is None:
+        return
+
+    required_tags = _get_required_swebench_image_tags(selected_couples)
+    if not required_tags:
+        return
+
+    sandbox_config_class = get_sandbox_config_class(experiment_config.sandbox_manager.type)
+    sandbox_config = sandbox_config_class.model_validate(experiment_config.sandbox_manager.config)
+    docker_client_name = getattr(sandbox_config, "docker_client", "local")
+    docker_client_config = getattr(sandbox_config, "docker_client_config", {})
+
+    docker = create_docker_client_from_config(docker_client_name, docker_client_config)
+    try:
+        missing_tags = {
+            tag for tag in sorted(required_tags) if not await _docker_image_exists(docker, tag)
+        }
+
+        if not missing_tags:
+            return
+
+        print("Building missing local SWE-bench Docker images:")
+        for tag in sorted(missing_tags):
+            print(f"  {tag}")
+
+        dataset_config_class = get_dataset_config_class("swebench")
+        dataset_config = dataset_config_class.model_validate(experiment_config.dataset.config)
+        build_specs = get_image_build_specs(
+            "swebench",
+            dataset_config,
+            ".siren-docker-cache/swebench",
+        )
+        selected_specs = [
+            spec for spec in build_specs if _image_build_spec_tag(spec) in missing_tags
+        ]
+        selected_tags = {_image_build_spec_tag(spec) for spec in selected_specs}
+        unmatched_tags = missing_tags - selected_tags
+        if unmatched_tags:
+            raise RuntimeError(
+                "No SWE-bench image build specs matched missing local images: "
+                + ", ".join(sorted(unmatched_tags))
+            )
+
+        builder = ImageBuilder(
+            docker_client=docker,
+            rebuild_existing=False,
+            registry=None,
+        )
+        errors = await builder.build_all_specs(selected_specs)
+        if errors:
+            details = ", ".join(
+                f"{error.image_tag}: {type(error.error).__name__}: {error.error}"
+                for error in errors
+            )
+            raise RuntimeError(f"Failed to build missing SWE-bench images: {details}")
+    finally:
+        await docker.close()
 
 
 def _expand_entities_for_required_runs(
@@ -298,6 +420,8 @@ async def run_attack_experiment(
     if not selected_couples:
         print("All task couples have completed the required number of runs.")
         return {}
+
+    await _ensure_local_swebench_images(experiment_config, selected_couples)
 
     # Run attack experiment
     with formatted_span(
