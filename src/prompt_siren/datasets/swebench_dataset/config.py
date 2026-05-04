@@ -36,7 +36,7 @@ class SwebenchDatasetConfig(BaseModel):
     # Prompt customization
     prompt_template: str = "swe-agent-swebench"
     """Prompt template to use. Can be:
-    - Built-in name: "mini-swe-agent" or "swe-agent-swebench"
+    - Built-in name: "mini-swe-agent", "plain-swebench", or "swe-agent-swebench"
     - Path to custom YAML file containing 'instance_template' key with Jinja2 template
 
     Defaults to "swe-agent-swebench".

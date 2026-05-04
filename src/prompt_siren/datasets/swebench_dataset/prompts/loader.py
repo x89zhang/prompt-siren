@@ -16,15 +16,16 @@ except ImportError as e:
     ) from e
 
 # Built-in prompt templates available
-BUILTIN_TEMPLATES = ["mini-swe-agent", "swe-agent-swebench"]
+BUILTIN_TEMPLATES = ["mini-swe-agent", "plain-swebench", "swe-agent-swebench"]
 
 
 def load_prompt_template(name_or_path: str) -> dict[str, str]:
     """Load a prompt template from a built-in name or file path.
 
     Args:
-        name_or_path: Either a built-in template name ("mini-swe-agent", "swe-agent-swebench")
-            or a path to a custom YAML file containing an 'instance_template' and a 'system_prompt' key.
+        name_or_path: Either a built-in template name ("mini-swe-agent", "plain-swebench",
+            "swe-agent-swebench") or a path to a custom YAML file containing an
+            'instance_template' and a 'system_prompt' key.
 
     Returns:
         Dictionary containing template keys (at minimum 'instance_template' and 'system_prompt')

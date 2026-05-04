@@ -65,6 +65,14 @@ class TestLoadPromptTemplate:
         assert "{{problem_statement}}" in template["instance_template"]
         assert "Important Boundaries" in template["instance_template"]
 
+    def test_load_builtin_plain_swebench(self):
+        """Test loading built-in plain-swebench template."""
+        template = load_prompt_template("plain-swebench")
+        assert "system_prompt" in template
+        assert "instance_template" in template
+        assert "{{problem_statement}}" in template["instance_template"]
+        assert "bash tool" in template["system_prompt"]
+
     def test_load_custom_file(self, tmp_path):
         """Test loading custom YAML file from path."""
         custom_yaml = tmp_path / "custom.yaml"
@@ -89,8 +97,9 @@ class TestLoadPromptTemplate:
     def test_builtin_templates_constant(self):
         """Test that BUILTIN_TEMPLATES constant is correct."""
         assert "mini-swe-agent" in BUILTIN_TEMPLATES
+        assert "plain-swebench" in BUILTIN_TEMPLATES
         assert "swe-agent-swebench" in BUILTIN_TEMPLATES
-        assert len(BUILTIN_TEMPLATES) == 2
+        assert len(BUILTIN_TEMPLATES) == 3
 
 
 class TestFormatTaskPromptFromTemplate:
@@ -137,6 +146,28 @@ class TestFormatTaskPromptFromTemplate:
         assert "Add new feature X" in result
         assert "Important Boundaries" in result
         assert "<pr_description>" in result
+
+    def test_format_plain_swebench_basic(self):
+        """Test formatting with plain-swebench template."""
+        instance = SWEbenchInstance(
+            problem_statement="Fix native tool calling",
+            repo="python/cpython",
+            instance_id="python__cpython-67890",
+            base_commit="def456abc789",
+            patch="",
+            test_patch="",
+            hints_text="",
+            created_at="2024-01-01",
+            version="1.0",
+            FAIL_TO_PASS="[]",
+            PASS_TO_PASS="[]",
+            environment_setup_commit="def456abc789",
+        )
+        result = format_task_prompt_from_template("plain-swebench", instance)
+        assert "Fix native tool calling" in result
+        assert "Tool Use" in result
+        assert "Use that tool directly" in result
+        assert "markdown code blocks" in result
 
     def test_format_without_hints(self, instance_with_hints: SWEbenchInstance):
         """Test that hints are not included when include_hints=False."""
@@ -251,10 +282,26 @@ class TestTemplateContent:
         assert "Environment Details" in content
         assert "DO NOT MODIFY: Tests" in content  # Important boundary
 
+    def test_plain_swebench_has_key_sections(self):
+        """Test that plain-swebench template has all expected sections."""
+        template = load_prompt_template("plain-swebench")
+        system_prompt = template["system_prompt"]
+        content = template["instance_template"]
+
+        assert "bash tool" in system_prompt
+        assert "Do not write shell commands in markdown code blocks" in system_prompt
+        assert "Tool Use" in content
+        assert "Boundaries" in content
+        assert "Recommended Workflow" in content
+        assert "DO NOT MODIFY: Tests" in content
+        assert "exactly ONE bash command" not in content
+
     def test_both_templates_use_problem_statement_variable(self):
-        """Test that both templates use {{problem_statement}} variable."""
+        """Test that built-in templates use {{problem_statement}} variable."""
         mini_template = load_prompt_template("mini-swe-agent")
+        plain_template = load_prompt_template("plain-swebench")
         swebench_template = load_prompt_template("swe-agent-swebench")
 
         assert "{{problem_statement}}" in mini_template["instance_template"]
+        assert "{{problem_statement}}" in plain_template["instance_template"]
         assert "{{problem_statement}}" in swebench_template["instance_template"]
