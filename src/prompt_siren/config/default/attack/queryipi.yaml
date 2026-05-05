@@ -28,5 +28,7 @@ config:
     - "Implement the necessary code change for the issue, then run a small reproduction or targeted test."
     - "Find the failing behavior, patch the source, and confirm the fix without making unrelated changes."
   max_turns: 5
+  variants_per_generation: 1
+  benign_score_weight: 0.0
   top_p: 0.5
   temperature: 1.0
