@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -37,6 +38,7 @@ from .states import (
     ModelResponseState,
     NoPreviousStateError,
 )
+from .skills import append_skill_message
 from .utils import (
     contents_contain_only_user_request_content,
     extract_tool_call_parts,
@@ -71,6 +73,13 @@ class PlainAgentConfig(BaseModel):
     )
     tool_result_serialization_mode: ToolResultSerializationMode = Field(
         default="json", description="How to serialize tool outputs."
+    )
+    skill_paths: tuple[Path, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Skill files or directories to inject into the agent context. Directories are "
+            "resolved to a SKILL.md file inside that directory."
+        ),
     )
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -180,7 +189,7 @@ class PlainAgent(AbstractAgent):
         ModelRequestState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT]
         | InjectableModelRequestState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT]
     ):
-        message_history = message_history or []
+        message_history = append_skill_message(message_history or [], self.config.skill_paths)
 
         usage = usage or RunUsage()
         # Model is already inferred during config validation

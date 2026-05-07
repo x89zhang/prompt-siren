@@ -1,6 +1,13 @@
 from prompt_siren.agents.mini_swe import MiniSweAgent, MiniSweAgentConfig
 from pydantic_ai import RunContext
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
 
@@ -65,3 +72,30 @@ def test_append_message_accumulates_model_usage() -> None:
     assert updated_ctx.usage.output_tokens == 8
     assert updated_ctx.usage.requests == 1
     assert updated_ctx.messages == [model_request, model_response]
+
+
+def test_skill_paths_are_added_to_initial_history(tmp_path) -> None:
+    skill_dir = tmp_path / "skill-dir"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("Prefer focused reproductions before broad tests.", encoding="utf-8")
+    agent = MiniSweAgent(
+        _config=MiniSweAgentConfig(
+            mini_swe_agent_path=None,
+            config_specs=[],
+            use_mini_templates=False,
+            skill_paths=(skill_dir,),
+        )
+    )
+
+    state = agent.create_initial_request_state(
+        environment=None,
+        env_state=None,
+        user_prompt="Fix the issue",
+    )
+
+    assert len(state.run_ctx.messages) == 1
+    skill_part = state.run_ctx.messages[0].parts[0]
+    assert isinstance(skill_part, SystemPromptPart)
+    assert "Prefer focused reproductions before broad tests." in skill_part.content
+    assert "SKILL.md" in skill_part.content

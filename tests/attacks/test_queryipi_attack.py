@@ -1,4 +1,5 @@
 from prompt_siren.attacks.queryipi_attack import (
+    _candidate_rank,
     _extract_payload,
     _resolve_attacker_model_name,
     create_queryipi_attack,
@@ -41,6 +42,48 @@ class TestQueryIPIAttack:
         assert attack.name == "queryipi"
         assert attack.config.agent_system_prompt == "system"
         assert attack.config.training_queries == ["query"]
+
+    def test_candidate_rank_prefers_higher_trajectory_level_on_score_tie(self):
+        low_uptake = type(
+            "Candidate",
+            (),
+            {"attack_score": 0.0, "trajectory_rank": 1, "combined_score": 1.0},
+        )()
+        high_uptake = type(
+            "Candidate",
+            (),
+            {"attack_score": 0.0, "trajectory_rank": 2, "combined_score": 0.0},
+        )()
+
+        assert _candidate_rank(high_uptake) > _candidate_rank(low_uptake)
+
+    def test_candidate_rank_prefers_attack_score_over_trajectory_level(self):
+        lower_score = type(
+            "Candidate",
+            (),
+            {"attack_score": 0.0, "trajectory_rank": 3, "combined_score": 1.0},
+        )()
+        higher_score = type(
+            "Candidate",
+            (),
+            {"attack_score": 0.1, "trajectory_rank": 1, "combined_score": 0.0},
+        )()
+
+        assert _candidate_rank(higher_score) > _candidate_rank(lower_score)
+
+    def test_candidate_rank_uses_combined_score_after_attack_and_trajectory(self):
+        lower_combined = type(
+            "Candidate",
+            (),
+            {"attack_score": 0.0, "trajectory_rank": 1, "combined_score": 0.1},
+        )()
+        higher_combined = type(
+            "Candidate",
+            (),
+            {"attack_score": 0.0, "trajectory_rank": 1, "combined_score": 0.2},
+        )()
+
+        assert _candidate_rank(higher_combined) > _candidate_rank(lower_combined)
 
 
 class TestQueryIPIAttackerModel:

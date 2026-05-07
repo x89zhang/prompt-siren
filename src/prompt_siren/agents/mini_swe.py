@@ -58,6 +58,7 @@ from .states import (
     ModelResponseState,
     NoPreviousStateError,
 )
+from .skills import append_skill_message
 from .utils import (
     get_model_request_parts_if_no_injectable,
     handle_tool_calls,
@@ -111,6 +112,13 @@ class MiniSweAgentConfig(BaseModel):
         description=(
             "Clone the Docker environment before each tool execution. The default avoids "
             "Docker network cloning issues and is sufficient for non-rollback attacks."
+        ),
+    )
+    skill_paths: tuple[Path, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Skill files or directories to inject into the agent context. Directories are "
+            "resolved to a SKILL.md file inside that directory."
         ),
     )
 
@@ -275,7 +283,7 @@ class MiniSweAgent(AbstractAgent):
         usage: RunUsage | None = None,
     ) -> ModelRequestState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT]:
         system_request, user_request = self._initial_parts(user_prompt)
-        history = list(message_history or [])
+        history = append_skill_message(message_history or [], self.config.skill_paths)
         if system_request is not None:
             history.append(system_request)
 

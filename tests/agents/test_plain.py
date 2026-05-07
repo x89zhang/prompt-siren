@@ -15,6 +15,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
+    SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -64,6 +65,31 @@ class TestAgent:
         assert result.messages[0].parts[0].content == "Hello"
         assert isinstance(result.messages[1].parts[0], TextPart)
         assert result.messages[1].parts[0].content == "Hello from agent"
+
+    async def test_skill_paths_are_added_to_initial_history(
+        self, mock_environment: MockEnvironment, mock_env_state: MockEnvState, tmp_path
+    ):
+        skill_path = tmp_path / "review-skill.md"
+        skill_path.write_text("Always inspect the diff before finalizing.", encoding="utf-8")
+        agent = PlainAgent(
+            _config=PlainAgentConfig(
+                model=TestModel(),
+                model_settings=ModelSettings(),
+                skill_paths=(skill_path,),
+            )
+        )
+
+        state = agent.create_initial_request_state(
+            mock_environment,
+            mock_env_state,
+            user_prompt="Review the change",
+        )
+
+        assert len(state.run_ctx.messages) == 1
+        skill_part = state.run_ctx.messages[0].parts[0]
+        assert isinstance(skill_part, SystemPromptPart)
+        assert "Always inspect the diff before finalizing." in skill_part.content
+        assert "review-skill.md" in skill_part.content
 
     async def test_agent_run_with_tool_call(
         self, mock_environment: MockEnvironment, mock_env_state: MockEnvState
