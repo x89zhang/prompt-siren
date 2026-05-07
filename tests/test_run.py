@@ -35,6 +35,7 @@ from prompt_siren.job.models import (
     TaskRunResult,
     TaskRunResumeState,
 )
+from prompt_siren.sandbox_managers.abstract import ExecOutput, StdoutChunk
 from prompt_siren.run import (
     run_single_tasks_without_attack,
     run_task_couples_with_attack,
@@ -661,6 +662,70 @@ class TestSystemPromptIntegration:
         assert isinstance(message_history[0].parts[0], SystemPromptPart)
         assert message_history[0].parts[0].content == "Test system prompt"
         assert message_history[1] == task_history[0]
+
+    async def test_benign_task_loads_default_skill_from_task_root(self):
+        captured_message_history = []
+
+        class RuntimeSkillSandboxManager:
+            async def exec(self, container_id, cmd, **kwargs):
+                assert container_id == "agent-container"
+                assert cmd == [
+                    "sh",
+                    "-c",
+                    "if [ -f /testbed/SKILL.md ]; then cat /testbed/SKILL.md; fi",
+                ]
+                assert kwargs["cwd"] == "/testbed"
+                return ExecOutput(
+                    outputs=[StdoutChunk("Use the project formatter before finalizing.")],
+                    exit_code=0,
+                )
+
+        class RuntimeSkillEnvState:
+            sandbox_manager = RuntimeSkillSandboxManager()
+
+            @property
+            def agent_container_id(self):
+                return "agent-container"
+
+        class RecordingAgent(PlainAgent):
+            async def run(self, *args, **kwargs):
+                captured_message_history.append(kwargs.get("message_history"))
+                return await super().run(*args, **kwargs)
+
+        async def dummy_evaluator(task_result: TaskResult[RuntimeSkillEnvState]) -> float:
+            return 1.0
+
+        task_history: list[ModelMessage] = [ModelResponse(parts=[TextPart("Previous context")])]
+        task = BenignTask(
+            id="test_task",
+            prompt="User prompt",
+            evaluators={"eval1": dummy_evaluator},
+            message_history=task_history,
+        )
+        env = MockEnvironment(
+            env_state=RuntimeSkillEnvState(),
+            all_injection_ids=[],
+            name="runtime-skill-env",
+        )
+        agent = RecordingAgent(PlainAgentConfig(model=TestModel(), model_settings=ModelSettings()))
+
+        await run_single_tasks_without_attack(
+            tasks=[task],
+            agent=agent,
+            env=env,
+            system_prompt="Test system prompt",
+            toolsets=[],
+            instrument=False,
+        )
+
+        message_history = captured_message_history[0]
+        assert len(message_history) == 3
+        assert isinstance(message_history[0].parts[0], SystemPromptPart)
+        assert message_history[0].parts[0].content == "Test system prompt"
+        assert isinstance(message_history[1].parts[0], SystemPromptPart)
+        assert "container:/testbed/SKILL.md" in message_history[1].parts[0].content
+        assert "Use the project formatter before finalizing." in message_history[1].parts[0].content
+        assert message_history[2] == task_history[0]
 
     async def test_benign_task_without_system_prompt(
         self, mock_environment: MockEnvironment, mock_dataset: MockDataset
