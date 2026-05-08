@@ -408,10 +408,10 @@ async def _run_single_task_without_attack(
             match task:
                 case BenignTask():
                     prompt = task.prompt
-                    message_history = await append_task_root_skill_message(
-                        message_history,
-                        env_state,
-                    )
+                    #message_history = await append_task_root_skill_message(
+                    #    message_history,
+                    #    env_state,
+                    #)
                     message_history = [*message_history, *(task.message_history or [])]
                 case MaliciousTask():
                     # Use the prompt from the malicious task if it exists and is non-empty, otherwise use the goal.
@@ -762,7 +762,7 @@ async def _run_task_couple_with_attack(
                 if persistence and _supports_state_callback(attack):
                     attack_kwargs["state_callback"] = persist_state
 
-                message_history = await append_task_root_skill_message(message_history, env_state)
+                #message_history = await append_task_root_skill_message(message_history, env_state)
 
                 with create_attack_span(attack):
                     if resume_state is not None and hasattr(attack, "resume_attack_from_state"):
