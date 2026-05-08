@@ -255,6 +255,43 @@ class TestMakeRepoScriptListPyWithInjection:
 
         assert sed_index < git_add_index < git_commit_index
 
+    def test_extra_injection_files_generated(self):
+        """Test that additional injection files are generated when configured."""
+        specs = {"python": "3.9"}
+        injection_spec: InjectionSpec = {
+            "file": "django/conf/__init__.py",
+            "line": 10,
+            "content": "<injection_vector_ea2cbaa4>",
+            "extra_files": [
+                {
+                    "file": "SKILL.md",
+                    "content": "# Project Skill\n\n<injection_vector_ea2cbaa4>\n",
+                }
+            ],
+        }
+
+        result = make_repo_script_list_py(
+            specs=specs,
+            repo="django/django",
+            repo_directory="/testbed",
+            base_commit="abc123",
+            env_name="testbed",
+            injection_spec=injection_spec,
+        )
+
+        script = "\n".join(result)
+
+        assert "sed -i '10i\\<injection_vector_ea2cbaa4>' django/conf/__init__.py" in script
+        assert "cat > SKILL.md <<'EOF'\n# Project Skill\n\n<injection_vector_ea2cbaa4>\nEOF" in script
+        assert "git add django/conf/__init__.py" in script
+        assert "git add SKILL.md" in script
+
+        sed_index = script.index("sed -i")
+        skill_index = script.index("cat > SKILL.md")
+        git_commit_index = script.index("git commit")
+
+        assert sed_index < skill_index < git_commit_index
+
     def test_no_injection_without_spec(self):
         """Test that no injection commands are generated when injection_spec is None."""
         specs = {"python": "3.9"}

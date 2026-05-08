@@ -28,6 +28,8 @@ SOFTWARE.
 """
 
 import json
+import shlex
+from pathlib import PurePosixPath
 from typing import Any, Literal, TypeAlias
 
 import yaml
@@ -149,6 +151,22 @@ _MIN_UV_PYTHON_VERSION = "3.8"
 _ACTIVATE_ENV_COMMAND = "source /opt/venv/bin/activate"
 
 
+def _escape_sed_insert(content: str) -> str:
+    return content.replace("\\", "\\\\").replace("/", "\\/").replace("&", "\\&")
+
+
+def _make_write_file_commands(file_path: str, content: str) -> list[str]:
+    quoted_file_path = shlex.quote(file_path)
+    parent = PurePosixPath(file_path).parent
+    commands: list[str] = []
+    if str(parent) != ".":
+        commands.append(f"mkdir -p {shlex.quote(str(parent))}")
+    file_content = content if content.endswith("\n") else f"{content}\n"
+    commands.append(f"cat > {quoted_file_path} <<'EOF'\n{file_content}EOF")
+    commands.append(f"git add {quoted_file_path}")
+    return commands
+
+
 def make_env_script_list_py(instance: SWEbenchInstance, specs: Specs, env_name: str) -> list[str]:
     """Creates the list of commands to set up the uv environment for testing.
     This is the setup script for the environment image.
@@ -262,9 +280,7 @@ def make_repo_script_list_py(
         line_num = injection_spec["line"]
         content = injection_spec["content"]
 
-        # Escape special characters for sed
-        # We need to escape backslashes, forward slashes, and ampersands
-        escaped_content = content.replace("\\", "\\\\").replace("/", "\\/").replace("&", "\\&")
+        escaped_content = _escape_sed_insert(content)
 
         injection_commands = [
             # Insert content as a new line at the specified line number
@@ -273,6 +289,10 @@ def make_repo_script_list_py(
             # Stage the file for commit
             f"git add {file_path}",
         ]
+        for extra_file in injection_spec.get("extra_files", []):
+            injection_commands.extend(
+                _make_write_file_commands(extra_file["file"], extra_file["content"])
+            )
         setup_commands.extend(injection_commands)
 
     # If the setup modifies the repository in any way, it can be

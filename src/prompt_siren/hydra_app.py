@@ -93,7 +93,12 @@ async def _ensure_local_swebench_images(
     experiment_config: ExperimentConfig,
     selected_couples: list[_RunnableEntity],
 ) -> None:
-    """Build missing local SWE-bench images for the selected attack couples."""
+    """Build local SWE-bench images needed for the selected attack couples.
+
+    By default, existing local images are reused. Setting
+    ``dataset.config.use_cache=false`` forces the selected local images to be
+    rebuilt, which is useful after changing repository setup/injection logic.
+    """
     if experiment_config.dataset.type != "swebench":
         return
     if experiment_config.dataset.config.get("registry") is not None:
@@ -112,38 +117,43 @@ async def _ensure_local_swebench_images(
 
     docker = create_docker_client_from_config(docker_client_name, docker_client_config)
     try:
-        missing_tags = {
-            tag for tag in sorted(required_tags) if not await _docker_image_exists(docker, tag)
-        }
-
-        if not missing_tags:
-            return
-
-        print("Building missing local SWE-bench Docker images:")
-        for tag in sorted(missing_tags):
-            print(f"  {tag}")
-
         dataset_config_class = get_dataset_config_class("swebench")
         dataset_config = dataset_config_class.model_validate(experiment_config.dataset.config)
+        rebuild_existing = not dataset_config.use_cache
+
+        build_tags = (
+            set(required_tags)
+            if rebuild_existing
+            else {tag for tag in sorted(required_tags) if not await _docker_image_exists(docker, tag)}
+        )
+
+        if not build_tags:
+            return
+
+        action = "Rebuilding" if rebuild_existing else "Building missing"
+        print(f"{action} local SWE-bench Docker images:")
+        for tag in sorted(build_tags):
+            print(f"  {tag}")
+
         build_specs = get_image_build_specs(
             "swebench",
             dataset_config,
             ".siren-docker-cache/swebench",
         )
         selected_specs = [
-            spec for spec in build_specs if _image_build_spec_tag(spec) in missing_tags
+            spec for spec in build_specs if _image_build_spec_tag(spec) in build_tags
         ]
         selected_tags = {_image_build_spec_tag(spec) for spec in selected_specs}
-        unmatched_tags = missing_tags - selected_tags
+        unmatched_tags = build_tags - selected_tags
         if unmatched_tags:
             raise RuntimeError(
-                "No SWE-bench image build specs matched missing local images: "
+                "No SWE-bench image build specs matched required local images: "
                 + ", ".join(sorted(unmatched_tags))
             )
 
         builder = ImageBuilder(
             docker_client=docker,
-            rebuild_existing=False,
+            rebuild_existing=rebuild_existing,
             registry=None,
         )
         errors = await builder.build_all_specs(selected_specs)

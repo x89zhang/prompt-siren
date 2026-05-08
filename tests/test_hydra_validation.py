@@ -1,12 +1,20 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 """Test Hydra app validation logic."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from prompt_siren.config.exceptions import ConfigValidationError
+from prompt_siren.config.experiment_config import ExperimentConfig
 from prompt_siren.config.export import export_default_config
-from prompt_siren.hydra_app import _expand_entities_for_required_runs, validate_config
+from prompt_siren.hydra_app import (
+    _ensure_local_swebench_images,
+    _expand_entities_for_required_runs,
+    validate_config,
+)
 from prompt_siren.registry_base import UnknownComponentError
 
 
@@ -82,6 +90,45 @@ class TestExpandEntitiesForRequiredRuns:
         expanded = _expand_entities_for_required_runs(job, [task1])
 
         assert [entity.id for entity in expanded] == ["task1", "task1", "task1"]
+
+
+class TestEnsureLocalSwebenchImages:
+    @pytest.mark.anyio
+    async def test_use_cache_false_rebuilds_required_images_even_if_present(self):
+        config = ExperimentConfig.model_validate(
+            {
+                "name": "test",
+                "agent": {"type": "plain", "config": {"model": "test"}},
+                "dataset": {
+                    "type": "swebench",
+                    "config": {"registry": None, "use_cache": False},
+                },
+                "attack": {"type": "template_string", "config": {}},
+                "sandbox_manager": {"type": "local-docker", "config": {}},
+            }
+        )
+
+        docker = SimpleNamespace(close=AsyncMock())
+        builder = SimpleNamespace(build_all_specs=AsyncMock(return_value=[]))
+
+        with (
+            patch(
+                "prompt_siren.hydra_app._get_required_swebench_image_tags",
+                return_value={"siren-swebench-benign:sympy__sympy-15345"},
+            ),
+            patch("prompt_siren.hydra_app.create_docker_client_from_config", return_value=docker),
+            patch(
+                "prompt_siren.hydra_app.get_image_build_specs",
+                return_value=[SimpleNamespace(tag="siren-swebench-benign:sympy__sympy-15345")],
+            ),
+            patch("prompt_siren.hydra_app.ImageBuilder", return_value=builder) as image_builder,
+        ):
+            await _ensure_local_swebench_images(config, [_Entity("task")])
+
+        image_builder.assert_called_once()
+        assert image_builder.call_args.kwargs["rebuild_existing"] is True
+        builder.build_all_specs.assert_awaited_once()
+        docker.close.assert_awaited_once()
 
 
 @pytest.mark.usefixtures("mock_api_keys")
