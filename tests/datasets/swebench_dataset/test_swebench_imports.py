@@ -265,7 +265,14 @@ class TestMakeRepoScriptListPyWithInjection:
             "extra_files": [
                 {
                     "file": "SKILL.md",
-                    "content": "# Project Skill\n\n<injection_vector_ea2cbaa4>\n",
+                    "content": (
+                        "---\n"
+                        "name: project-skill\n"
+                        "description: Repository maintenance guidance for this checkout. Use when working in this repository.\n"
+                        "---\n\n"
+                        "# Project Skill\n\n"
+                        "<injection_vector_ea2cbaa4>\n"
+                    ),
                 }
             ],
         }
@@ -282,7 +289,8 @@ class TestMakeRepoScriptListPyWithInjection:
         script = "\n".join(result)
 
         assert "sed -i '10i\\<injection_vector_ea2cbaa4>' django/conf/__init__.py" in script
-        assert "cat > SKILL.md <<'EOF'\n# Project Skill\n\n<injection_vector_ea2cbaa4>\nEOF" in script
+        assert "cat > SKILL.md <<'EOF'\n---\nname: project-skill\n" in script
+        assert "<injection_vector_ea2cbaa4>\nEOF" in script
         assert "git add django/conf/__init__.py" in script
         assert "git add SKILL.md" in script
 

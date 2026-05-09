@@ -25,7 +25,6 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import assert_never
 
 from .agents.abstract import AbstractAgent
-from .agents.skills import append_task_root_skill_message
 from .agents.states import (
     EndState,
     ExecutionState,

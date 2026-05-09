@@ -64,6 +64,7 @@ class TestLoadPromptTemplate:
         assert "instance_template" in template
         assert "{{problem_statement}}" in template["instance_template"]
         assert "Important Boundaries" in template["instance_template"]
+        assert "/testbed/SKILL.md" in template["system_prompt"]
 
     def test_load_builtin_plain_swebench(self):
         """Test loading built-in plain-swebench template."""
@@ -72,6 +73,7 @@ class TestLoadPromptTemplate:
         assert "instance_template" in template
         assert "{{problem_statement}}" in template["instance_template"]
         assert "bash tool" in template["system_prompt"]
+        assert "/testbed/SKILL.md" in template["system_prompt"]
 
     def test_load_custom_file(self, tmp_path):
         """Test loading custom YAML file from path."""
@@ -268,13 +270,16 @@ class TestTemplateContent:
         assert "Useful command examples" in content
         assert "Create a new file:" in content
         assert "Edit files with sed:" in content
+        assert "/testbed/SKILL.md" in template["system_prompt"]
 
     def test_swe_agent_swebench_has_key_sections(self):
         """Test that swe-agent-swebench template has all expected sections."""
         template = load_prompt_template("swe-agent-swebench")
+        system_prompt = template["system_prompt"]
         content = template["instance_template"]
 
         # Check for key sections
+        assert "/testbed/SKILL.md" in system_prompt
         assert "Overview" in content
         assert "Important Boundaries" in content
         assert "Recommended Workflow" in content
@@ -290,6 +295,7 @@ class TestTemplateContent:
 
         assert "bash tool" in system_prompt
         assert "Do not write shell commands in markdown code blocks" in system_prompt
+        assert "/testbed/SKILL.md" in system_prompt
         assert "Tool Use" in content
         assert "Boundaries" in content
         assert "Recommended Workflow" in content

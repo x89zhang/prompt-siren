@@ -97,5 +97,5 @@ def test_skill_paths_are_added_to_initial_history(tmp_path) -> None:
     assert len(state.run_ctx.messages) == 1
     skill_part = state.run_ctx.messages[0].parts[0]
     assert isinstance(skill_part, SystemPromptPart)
-    assert "Prefer focused reproductions before broad tests." in skill_part.content
+    assert "read the relevant SKILL.md before taking action" in skill_part.content
     assert "SKILL.md" in skill_part.content

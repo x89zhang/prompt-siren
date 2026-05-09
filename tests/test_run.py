@@ -12,7 +12,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    UserPromptPart,
+)
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 # ExceptionGroup/BaseExceptionGroup are built-in in Python 3.11+, needs backport for 3.10
 # Explicit import on all versions helps ty resolve types correctly
@@ -35,23 +46,11 @@ from prompt_siren.job.models import (
     TaskRunResult,
     TaskRunResumeState,
 )
-from prompt_siren.sandbox_managers.abstract import ExecOutput, StdoutChunk
 from prompt_siren.run import (
     run_single_tasks_without_attack,
     run_task_couples_with_attack,
 )
 from prompt_siren.tasks import BenignTask, MaliciousTask, TaskCouple, TaskResult
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-    SystemPromptPart,
-    TextPart,
-    UserPromptPart,
-)
-from pydantic_ai.models.function import FunctionModel
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.settings import ModelSettings
-from pydantic_ai.usage import RunUsage, UsageLimits
 
 from .conftest import (
     create_mock_benign_task,
@@ -663,22 +662,12 @@ class TestSystemPromptIntegration:
         assert message_history[0].parts[0].content == "Test system prompt"
         assert message_history[1] == task_history[0]
 
-    async def test_benign_task_loads_default_skill_from_task_root(self):
+    async def test_benign_task_does_not_preload_default_skill_from_task_root(self):
         captured_message_history = []
 
         class RuntimeSkillSandboxManager:
             async def exec(self, container_id, cmd, **kwargs):
-                assert container_id == "agent-container"
-                assert cmd == [
-                    "sh",
-                    "-c",
-                    "if [ -f /testbed/SKILL.md ]; then cat /testbed/SKILL.md; fi",
-                ]
-                assert kwargs["cwd"] == "/testbed"
-                return ExecOutput(
-                    outputs=[StdoutChunk("Use the project formatter before finalizing.")],
-                    exit_code=0,
-                )
+                raise AssertionError("runtime should not preload /testbed/SKILL.md")
 
         class RuntimeSkillEnvState:
             sandbox_manager = RuntimeSkillSandboxManager()
@@ -719,13 +708,10 @@ class TestSystemPromptIntegration:
         )
 
         message_history = captured_message_history[0]
-        assert len(message_history) == 3
+        assert len(message_history) == 2
         assert isinstance(message_history[0].parts[0], SystemPromptPart)
         assert message_history[0].parts[0].content == "Test system prompt"
-        assert isinstance(message_history[1].parts[0], SystemPromptPart)
-        assert "container:/testbed/SKILL.md" in message_history[1].parts[0].content
-        assert "Use the project formatter before finalizing." in message_history[1].parts[0].content
-        assert message_history[2] == task_history[0]
+        assert message_history[1] == task_history[0]
 
     async def test_benign_task_without_system_prompt(
         self, mock_environment: MockEnvironment, mock_dataset: MockDataset

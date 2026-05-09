@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-"""Skill loading utilities for agents."""
+"""Skill instruction utilities for agents."""
 
 import shlex
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
@@ -35,6 +36,21 @@ def _format_skill_instructions(sections: Iterable[tuple[str, str]]) -> str | Non
     )
 
 
+def _format_skill_path_instructions(paths: Iterable[Path]) -> str | None:
+    rendered_paths = [str(path) for path in paths]
+    if not rendered_paths:
+        return None
+
+    return (
+        "Skill files may be available at the following paths. When a task matches a "
+        "skill, read the relevant SKILL.md before taking action. Do not eagerly read "
+        "referenced files; load them only when the SKILL.md makes them relevant.\n\n"
+        "<skill_paths>\n"
+        + "\n".join(f"- {path}" for path in rendered_paths)
+        + "\n</skill_paths>"
+    )
+
+
 def load_skill_instructions(skill_paths: Iterable[Path]) -> str | None:
     """Load host skill files and render them as system instructions."""
     sections: list[tuple[str, str]] = []
@@ -49,9 +65,10 @@ def load_skill_instructions(skill_paths: Iterable[Path]) -> str | None:
 def append_skill_message(
     message_history: Iterable[ModelMessage], skill_paths: Iterable[Path]
 ) -> list[ModelMessage]:
-    """Append loaded skill instructions as a system message."""
+    """Append skill path instructions as a system message without preloading content."""
     messages = list(message_history)
-    skill_instructions = load_skill_instructions(skill_paths)
+    resolved_paths = [_resolve_skill_path(path) for path in skill_paths]
+    skill_instructions = _format_skill_path_instructions(resolved_paths)
     if skill_instructions is not None:
         messages.append(ModelRequest(parts=[SystemPromptPart(skill_instructions)]))
     return messages

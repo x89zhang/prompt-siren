@@ -88,7 +88,7 @@ class TestAgent:
         assert len(state.run_ctx.messages) == 1
         skill_part = state.run_ctx.messages[0].parts[0]
         assert isinstance(skill_part, SystemPromptPart)
-        assert "Always inspect the diff before finalizing." in skill_part.content
+        assert "read the relevant SKILL.md before taking action" in skill_part.content
         assert "review-skill.md" in skill_part.content
 
     async def test_agent_run_with_tool_call(
