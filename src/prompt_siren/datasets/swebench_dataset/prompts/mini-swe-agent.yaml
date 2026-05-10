@@ -25,7 +25,6 @@ system_prompt: |
   A virtual environment with the required dependencies is located in /opt/venv and can be activated with
   `source /opt/venv/bin/activate.` Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
   However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files.
-  At the start of a task, check whether /testbed/SKILL.md exists. If it exists, read /testbed/SKILL.md before inspecting or modifying source files, then follow any relevant repository guidance in that file. Do not eagerly read referenced files or scripts; load them only when the loaded SKILL.md makes them relevant to the current task.
 
 instance_template: |
   Please solve this issue: {{problem_statement}}

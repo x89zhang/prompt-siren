@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -9,6 +9,13 @@ import logfire
 from jinja2 import Environment, StrictUndefined, TemplateSyntaxError
 from pydantic import BaseModel
 from pydantic_ai import InstrumentationSettings, ModelMessage
+from pydantic_ai.messages import (
+    ModelRequest,
+    RetryPromptPart,
+    SystemPromptPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import KnownModelName
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import UsageLimits
@@ -45,6 +52,33 @@ def _get_model_name(model_name: str | KnownModelName) -> str:
     if "llama" in model_name:
         return "Llama"
     raise UnknownModelError(f"Unknown model error: '{model_name}'")
+
+
+def _render_template_payload(
+    config: "TemplateStringAttackConfig",
+    *,
+    goal: str,
+    model_name: str | KnownModelName,
+) -> str:
+    env = Environment(undefined=StrictUndefined)
+    template = env.from_string(config.attack_template)
+
+    template_context = {
+        "goal": goal,
+        **config.template_fields,
+    }
+    if "model" not in template_context:
+        template_context["model"] = _get_model_name(model_name)
+
+    try:
+        return template.render(**template_context)
+    except TemplateSyntaxError as e:
+        logfire.error(
+            "Jinja2 template syntax error",
+            error=str(e),
+            template=config.attack_template,
+        )
+        raise
 
 
 _DEFAULT_ATTACK_TEMPLATE = (
@@ -86,6 +120,51 @@ class TemplateStringAttack(
     def config(self) -> TemplateStringAttackConfig:
         return self._config
 
+    async def _prepare_message_history(
+        self,
+        environment: AbstractEnvironment[EnvStateT, str, str, StrContentAttack],
+        message_history: Sequence[ModelMessage],
+        malicious_task: MaliciousTask[EnvStateT],
+        agent: AbstractAgent,
+        attacks: InjectionAttacksDict[StrContentAttack],
+    ) -> list[ModelMessage]:
+        """Render injection placeholders already present in initial history."""
+
+        prepared: list[ModelMessage] = []
+        for message in message_history:
+            if not isinstance(message, ModelRequest):
+                prepared.append(message)
+                continue
+
+            rendered_parts = []
+            for part in message.parts:
+                if not isinstance(
+                    part, SystemPromptPart | UserPromptPart | ToolReturnPart | RetryPromptPart
+                ) or not isinstance(part.content, str):
+                    rendered_parts.append(part)
+                    continue
+
+                vector_ids = await environment.get_injectable_ids(part.content)
+                for vector_id in vector_ids:
+                    if vector_id not in attacks:
+                        attacks[vector_id] = StrContentAttack(
+                            content=_render_template_payload(
+                                self.config,
+                                goal=malicious_task.goal,
+                                model_name=agent.get_agent_name(),
+                            )
+                        )
+
+                if vector_ids:
+                    rendered_content = await environment.render(part.content, attacks)
+                    rendered_parts.append(replace(part, content=rendered_content))
+                else:
+                    rendered_parts.append(part)
+
+            prepared.append(replace(message, parts=rendered_parts))
+
+        return prepared
+
     async def attack(
         self,
         agent: AbstractAgent,
@@ -110,12 +189,19 @@ class TemplateStringAttack(
         InjectionAttacksDict[StrContentAttack],
     ]:
         attacks: InjectionAttacksDict[StrContentAttack] = {}
+        initial_message_history = await self._prepare_message_history(
+            environment,
+            [*message_history, *(benign_task.message_history or [])],
+            malicious_task,
+            agent,
+            attacks,
+        )
 
         state = agent.create_initial_request_state(
             environment,
             env_state,
             benign_task.prompt,
-            message_history=[*message_history, *(benign_task.message_history or [])],
+            message_history=initial_message_history,
         )
 
         while not isinstance(state, EndState):
@@ -134,29 +220,11 @@ class TemplateStringAttack(
                 if not is_injectable_model_request_part(part):
                     continue
                 for vector_id in part.vector_ids:
-                    # Create Jinja2 environment and render template
-                    env = Environment(undefined=StrictUndefined)
-                    template = env.from_string(self.config.attack_template)
-
-                    # Merge default fields with custom template fields
-                    template_context = {
-                        "goal": malicious_task.goal,
-                        **self.config.template_fields,
-                    }
-
-                    # Add model name if not already provided in template_fields
-                    if "model" not in template_context:
-                        template_context["model"] = _get_model_name(agent.get_agent_name())
-
-                    try:
-                        injection = template.render(**template_context)
-                    except TemplateSyntaxError as e:
-                        logfire.error(
-                            "Jinja2 template syntax error",
-                            error=str(e),
-                            template=self.config.attack_template,
-                        )
-                        raise
+                    injection = _render_template_payload(
+                        self.config,
+                        goal=malicious_task.goal,
+                        model_name=agent.get_agent_name(),
+                    )
 
                     logfire.info(
                         "creating injection",

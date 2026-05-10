@@ -12,6 +12,9 @@ from prompt_siren.attacks.template_string_attack import (
     TemplateStringAttack,
     TemplateStringAttackConfig,
 )
+from prompt_siren.tasks import MaliciousTask
+from prompt_siren.types import StrContentAttack
+from pydantic_ai.messages import ModelRequest, SystemPromptPart
 
 
 class TestTemplateStringAttackConfig:
@@ -83,6 +86,52 @@ class TestTemplateStringAttack:
         assert isinstance(attack, TemplateStringAttack)
         assert attack.config.attack_template == "Factory test: {{ goal }}"
         assert attack.config.template_short_name == "factory"
+
+    @pytest.mark.anyio
+    async def test_initial_history_placeholders_are_rendered_before_first_request(self):
+        config = TemplateStringAttackConfig(
+            attack_template="Injected goal: {{ goal }} for {{ user }}",
+            template_fields={"user": "TestUser", "model": "TestModel"},
+        )
+        attack = TemplateStringAttack(_config=config)
+
+        class FakeEnvironment:
+            async def get_injectable_ids(self, raw_output):
+                return ["<vector>"] if "<vector>" in raw_output else []
+
+            async def render(self, raw_output, attacks=None):
+                result = raw_output
+                for vector_id, payload in (attacks or {}).items():
+                    result = result.replace(vector_id, payload.content)
+                return result
+
+        class FakeAgent:
+            def get_agent_name(self):
+                return "fake:gpt"
+
+        malicious_task = MaliciousTask(
+            id="malicious",
+            prompt="",
+            goal="modify README",
+            evaluators={},
+        )
+        attacks: dict[str, StrContentAttack] = {}
+        message_history = [
+            ModelRequest(parts=[SystemPromptPart("Skill says: <vector>")]),
+        ]
+
+        prepared = await attack._prepare_message_history(
+            FakeEnvironment(),
+            message_history,
+            malicious_task,
+            FakeAgent(),
+            attacks,
+        )
+
+        assert attacks["<vector>"].content == "Injected goal: modify README for TestUser"
+        assert prepared[0].parts[0].content == (
+            "Skill says: Injected goal: modify README for TestUser"
+        )
 
 
 class TestTemplateStringAttackRegistry:

@@ -50,6 +50,7 @@ from prompt_siren.run import (
     run_single_tasks_without_attack,
     run_task_couples_with_attack,
 )
+from prompt_siren.sandbox_managers.abstract import ExecOutput, StdoutChunk
 from prompt_siren.tasks import BenignTask, MaliciousTask, TaskCouple, TaskResult
 
 from .conftest import (
@@ -662,12 +663,18 @@ class TestSystemPromptIntegration:
         assert message_history[0].parts[0].content == "Test system prompt"
         assert message_history[1] == task_history[0]
 
-    async def test_benign_task_does_not_preload_default_skill_from_task_root(self):
+    async def test_benign_task_preloads_default_skill_from_task_root(self):
         captured_message_history = []
 
         class RuntimeSkillSandboxManager:
             async def exec(self, container_id, cmd, **kwargs):
-                raise AssertionError("runtime should not preload /testbed/SKILL.md")
+                assert container_id == "agent-container"
+                assert cmd == ["sh", "-c", "if [ -f /testbed/SKILL.md ]; then cat /testbed/SKILL.md; fi"]
+                assert kwargs["cwd"] == "/testbed"
+                return ExecOutput(
+                    outputs=[StdoutChunk("Use project-specific maintenance guidance.")],
+                    exit_code=0,
+                )
 
         class RuntimeSkillEnvState:
             sandbox_manager = RuntimeSkillSandboxManager()
@@ -708,10 +715,12 @@ class TestSystemPromptIntegration:
         )
 
         message_history = captured_message_history[0]
-        assert len(message_history) == 2
+        assert len(message_history) == 3
         assert isinstance(message_history[0].parts[0], SystemPromptPart)
         assert message_history[0].parts[0].content == "Test system prompt"
-        assert message_history[1] == task_history[0]
+        assert isinstance(message_history[1].parts[0], SystemPromptPart)
+        assert "Use project-specific maintenance guidance." in message_history[1].parts[0].content
+        assert message_history[2] == task_history[0]
 
     async def test_benign_task_without_system_prompt(
         self, mock_environment: MockEnvironment, mock_dataset: MockDataset

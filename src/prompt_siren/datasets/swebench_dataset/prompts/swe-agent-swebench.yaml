@@ -26,13 +26,6 @@ system_prompt: |
   `source /opt/venv/bin/activate.` Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
   However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files.
 
-  Skill loading:
-  - At the start of a task, check whether /testbed/SKILL.md exists.
-  - If it exists, read /testbed/SKILL.md before inspecting or modifying source files, then follow any
-    relevant repository guidance in that file.
-  - Do not eagerly read every referenced file. Load referenced files or scripts only when the loaded
-    SKILL.md makes them relevant to the current task.
-
 instance_template: |
   <pr_description>
   Consider the following PR description:
