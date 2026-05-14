@@ -24,6 +24,7 @@ from prompt_siren.job.models import (
 )
 from prompt_siren.job.persistence import (
     _save_config_yaml,
+    _success_case_model_name,
     JobPersistence,
     load_config_yaml,
 )
@@ -198,6 +199,66 @@ class TestSaveCoupleRun:
         assert execution.trajectory_labels is not None
         assert execution.trajectory_labels["trajectory_level"] == "L4"
         assert execution.trajectory_labels["messages"][-1]["message_level"] == "L4"
+
+    def test_records_successful_attack_case(
+        self,
+        job_config: JobConfig,
+        tmp_path: Path,
+        mock_task_span: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Test that attack score 1.0 is recorded in the success case docs."""
+
+        async def benign_eval(task_result: TaskResult) -> float:
+            return 0.9
+
+        async def malicious_eval(task_result: TaskResult) -> float:
+            return 1.0
+
+        job_config.execution_mode = "attack"
+        job_config.job_name = "attack_job"
+        job_config.agent.config = {"model": "gpt-5.1"}
+        persistence = JobPersistence.create(tmp_path, job_config)
+        recorder = MagicMock()
+        monkeypatch.setattr("prompt_siren.job.persistence.record_attack_success_case", recorder)
+
+        benign = BenignTask(id="benign1", prompt="benign", evaluators={"eval1": benign_eval})
+        malicious = MaliciousTask(id="mal1", goal="goal", evaluators={"eval1": malicious_eval})
+        couple = TaskCouple(benign=benign, malicious=malicious)
+
+        run_dir = persistence.save_couple_run(
+            couple=couple,
+            benign_eval=EvaluationResult(task_id="benign1", results={"eval1": 0.9}),
+            malicious_eval=EvaluationResult(task_id="mal1", results={"eval1": 1.0}),
+            messages=[ModelResponse(parts=[TextPart("response")])],
+            usage=RunUsage(),
+            task_span=mock_task_span,
+            started_at=datetime.now(),
+        )
+
+        recorder.assert_called_once_with(
+            task_id=couple.id,
+            model="gpt-5.1",
+            attack_score=1.0,
+            job_name="attack_job",
+            run_id=run_dir.name,
+        )
+
+    def test_success_case_model_name_prefers_mini_swe_config_specs(
+        self,
+        job_config: JobConfig,
+        tmp_path: Path,
+    ):
+        """Mini-swe's runtime model comes from config_specs, not agent.config.model."""
+        mini_swe_config = tmp_path / "gpt5.yaml"
+        mini_swe_config.write_text("model:\n  model_name: openai/gpt-5.1\n")
+        job_config.agent.type = "mini_swe"
+        job_config.agent.config = {
+            "model": "azure:gpt-5-nano",
+            "config_specs": [str(mini_swe_config), "agent.mode=yolo"],
+        }
+
+        assert _success_case_model_name(job_config) == "gpt-5.1"
 
 
 class TestSavePartialExecution:

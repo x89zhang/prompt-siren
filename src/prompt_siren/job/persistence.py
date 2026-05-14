@@ -10,12 +10,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
+import logfire
 import yaml
 from filelock import FileLock
 from logfire import LogfireSpan
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import RunUsage
 
+from ..attack_success_cases import record_attack_success_case
 from ..tasks import EvaluationResult, Task, TaskCouple
 from ..trajectory_labeling import label_trajectory, TrajectoryLabels, UptakeLevel
 from ..types import InjectionAttack, InjectionAttacksDictTypeAdapter
@@ -412,8 +414,33 @@ class JobPersistence:
             exception_type=exception_info.exception_type if exception_info else None,
             path=run_dir.relative_to(self.job_dir),
         )
+        if attack_score >= 1.0 and exception_info is None:
+            self._record_attack_success_case(
+                task_id=couple.id,
+                attack_score=attack_score,
+                run_id=run_id,
+            )
 
         return run_dir
+
+    def _record_attack_success_case(
+        self,
+        *,
+        task_id: str,
+        attack_score: float,
+        run_id: str,
+    ) -> None:
+        """Best-effort update of the repository docs table for successful attacks."""
+        try:
+            record_attack_success_case(
+                task_id=task_id,
+                model=_success_case_model_name(self.job_config),
+                attack_score=attack_score,
+                job_name=self.job_config.job_name,
+                run_id=run_id,
+            )
+        except Exception as e:
+            logfire.warning(f"Failed to update attack success cases docs: {e}")
 
     def _append_to_index(
         self,
@@ -503,6 +530,45 @@ class JobPersistence:
             with open(index_path, "w") as f:
                 for entry in filtered_entries:
                     f.write(entry.model_dump_json() + "\n")
+
+
+def _success_case_model_name(job_config: JobConfig) -> str:
+    agent_config = job_config.agent.config
+    if job_config.agent.type == "mini_swe":
+        for spec in agent_config.get("config_specs", []):
+            spec_path = Path(str(spec)).expanduser()
+            if not spec_path.is_file():
+                continue
+            try:
+                spec_config = yaml.safe_load(spec_path.read_text()) or {}
+            except Exception:
+                continue
+            model_config = spec_config.get("model")
+            if not isinstance(model_config, dict):
+                continue
+            raw_model = model_config.get("model_name") or model_config.get("model")
+            if raw_model:
+                return _display_model_name(str(raw_model))
+
+    raw_model = agent_config.get("model")
+    if isinstance(raw_model, dict):
+        raw_model = raw_model.get("model_name") or raw_model.get("model")
+    if raw_model:
+        return _display_model_name(str(raw_model))
+
+    raw_model = agent_config.get("model_name")
+    if raw_model:
+        return _display_model_name(str(raw_model))
+
+    return job_config.agent.type
+
+
+def _display_model_name(model_name: str) -> str:
+    if model_name.startswith("openai/"):
+        return model_name.split("/", 1)[1]
+    if model_name.startswith("openai:"):
+        return model_name.split(":", 1)[1]
+    return model_name
 
 
 def _save_config_yaml(config_path: Path, job_config: JobConfig) -> None:
