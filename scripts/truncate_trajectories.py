@@ -349,7 +349,7 @@ def truncate_one(
 def parse_level(value: str) -> UptakeLevel:
     normalized = value.upper()
     if normalized not in LEVEL_RANK or normalized == "L0":
-        raise argparse.ArgumentTypeError("level must be one of L1, L2, L3, L4")
+        raise argparse.ArgumentTypeError("level must be one of L1, L2, L3, L4, L5")
     return normalized  # type: ignore[return-value]
 
 
@@ -367,8 +367,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--levels",
         nargs="+",
         type=parse_level,
-        default=["L2", "L3", "L4"],
-        help="Target levels to truncate at. Defaults to L2 L3 L4.",
+        default=["L2", "L3", "L4", "L5"],
+        help="Target levels to truncate at. Defaults to L2 L3 L4 L5.",
     )
     parser.add_argument(
         "--cut-source",

@@ -193,12 +193,12 @@ class TestSaveCoupleRun:
         loaded = TaskRunResult.model_validate_json((run_dir / TASK_RESULT_FILENAME).read_text())
         assert loaded.benign_score == 0.9
         assert loaded.attack_score == 0.3
-        assert loaded.trajectory_level == "L4"
+        assert loaded.trajectory_level == "L5"
 
         execution = job_persistence.load_execution(couple.id, loaded.run_id)
         assert execution.trajectory_labels is not None
-        assert execution.trajectory_labels["trajectory_level"] == "L4"
-        assert execution.trajectory_labels["messages"][-1]["message_level"] == "L4"
+        assert execution.trajectory_labels["trajectory_level"] == "L5"
+        assert execution.trajectory_labels["messages"][-1]["message_level"] == "L5"
 
     def test_records_successful_attack_case(
         self,

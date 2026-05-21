@@ -44,8 +44,8 @@ execution:
 # TRAJECTORY LABELING
 # =============================================================================
 trajectory_labeling:
-  l2_judge_enabled: true # Use the agent model as an LLM judge for L2 verbal uptake
-  l2_threshold: 7.0 # LLM judge score >= threshold is labeled L2
+  l2_judge_enabled: true # Use the agent model as an LLM judge for L3 verbal uptake
+  l2_threshold: 7.0 # LLM judge score >= threshold is labeled L3
 
 # =============================================================================
 # TASK SELECTION

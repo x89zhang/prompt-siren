@@ -47,7 +47,7 @@ class TaskRunResult(BaseModel):
     finished_at: datetime | None = None
     benign_score: float | None = None
     attack_score: float | None = None
-    trajectory_level: Literal["L0", "L1", "L2", "L3", "L4"] | None = None
+    trajectory_level: Literal["L0", "L1", "L2", "L3", "L4", "L5"] | None = None
     attacks: dict[str, Any] | None = None
     exception_info: ExceptionInfo | None = None
 

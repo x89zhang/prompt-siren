@@ -215,18 +215,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--l2-judge-model",
         default=None,
-        help="Optional model name for L2 LLM judge. If omitted, no L2 judge is used unless --use-job-agent-model is set.",
+        help="Optional model name for L3 verbal-uptake LLM judge. If omitted, no verbal-uptake judge is used unless --use-job-agent-model is set.",
     )
     parser.add_argument(
         "--use-job-agent-model",
         action="store_true",
-        help="Use the agent model recorded in the job config for L2 judging.",
+        help="Use the agent model recorded in the job config for L3 verbal-uptake judging.",
     )
     parser.add_argument(
         "--l2-threshold",
         type=float,
         default=7.0,
-        help="Minimum 1-10 LLM judge score required to label an agent message as L2.",
+        help="Minimum 1-10 LLM judge score required to label an agent message as L3.",
     )
     return parser.parse_args(argv)
 

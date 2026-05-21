@@ -56,13 +56,13 @@ class TrajectoryLabelingConfig(BaseModel):
 
     l2_judge_enabled: bool = Field(
         default=True,
-        description="Use the agent model as an LLM judge for L2 verbal uptake.",
+        description="Use the agent model as an LLM judge for L3 verbal uptake.",
     )
     l2_threshold: float = Field(
         default=7.0,
         ge=1.0,
         le=10.0,
-        description="Minimum LLM judge score required to label a message as L2.",
+        description="Minimum LLM judge score required to label a message as L3.",
     )
 
 
