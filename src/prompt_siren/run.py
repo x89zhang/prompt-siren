@@ -194,17 +194,26 @@ async def _label_trajectory_for_result(
         labeling_config = persistence.job_config.trajectory_labeling
         judge_model = None
         judge_model_settings = None
-        if labeling_config.l2_judge_enabled:
+        old_path_judge_enabled = (
+            labeling_config.l2_reaction_judge_enabled or labeling_config.l3_judge_enabled
+        )
+        if old_path_judge_enabled:
             judge_model, judge_model_settings = _labeling_model_for_agent(agent)
+
+        l2_reaction_judge_model = judge_model if old_path_judge_enabled else None
+        l3_judge_model = judge_model if old_path_judge_enabled else None
 
         labels = await label_trajectory_async(
             messages,
             attacks=generated_attacks,
             attack_score=attack_score,
-            l2_judge_model=judge_model,
+            l2_reaction_judge_model=l2_reaction_judge_model,
+            l2_reaction_judge_model_settings=judge_model_settings,
+            l2_reaction_threshold=labeling_config.l2_reaction_threshold,
+            l2_judge_model=l3_judge_model,
             l2_judge_model_settings=judge_model_settings,
-            l2_threshold=labeling_config.l2_threshold,
-            l3_pattern_model=judge_model,
+            l2_threshold=labeling_config.l3_threshold,
+            l3_pattern_model=l3_judge_model,
             l3_pattern_model_settings=judge_model_settings,
             task_id=task_id,
         )

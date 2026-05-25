@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_ai.usage import UsageLimits
 
 
@@ -54,16 +54,39 @@ class ExecutionConfig(BaseModel):
 class TrajectoryLabelingConfig(BaseModel):
     """Configuration for trajectory uptake labeling."""
 
-    l2_judge_enabled: bool = Field(
+    l2_reaction_judge_enabled: bool = Field(
         default=True,
-        description="Use the agent model as an LLM judge for L3 verbal uptake.",
+        description="Use the agent model as an LLM judge for L2 reaction without uptake.",
     )
-    l2_threshold: float = Field(
+    l2_reaction_threshold: float = Field(
         default=7.0,
         ge=1.0,
         le=10.0,
+        description="Minimum LLM judge score required to label a message as L2.",
+    )
+
+    l3_judge_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("l3_judge_enabled", "l2_judge_enabled"),
+        description="Use the agent model as an LLM judge for L3 verbal uptake.",
+    )
+    l3_threshold: float = Field(
+        default=7.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("l3_threshold", "l2_threshold"),
         description="Minimum LLM judge score required to label a message as L3.",
     )
+
+    @property
+    def l2_judge_enabled(self) -> bool:
+        """Backward-compatible alias for the old 5-level naming."""
+        return self.l3_judge_enabled
+
+    @property
+    def l2_threshold(self) -> float:
+        """Backward-compatible alias for the old 5-level naming."""
+        return self.l3_threshold
 
 
 class OutputConfig(BaseModel):
