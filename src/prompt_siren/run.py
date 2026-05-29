@@ -49,7 +49,12 @@ from .tasks import (
 )
 from .telemetry.formatted_span import formatted_span
 from .telemetry.workbench_spans import create_attack_span, create_task_span
-from .trajectory_labeling import label_trajectory_async, TrajectoryLabels
+from .trajectory_labeling import (
+    JudgeAuditSettings,
+    label_trajectory_async,
+    label_trajectory_with_judge_audit,
+    TrajectoryLabels,
+)
 from .types import InjectionAttack, InjectionAttacksDictTypeAdapter
 
 EntityT = TypeVar("EntityT")
@@ -194,29 +199,57 @@ async def _label_trajectory_for_result(
         labeling_config = persistence.job_config.trajectory_labeling
         judge_model = None
         judge_model_settings = None
-        old_path_judge_enabled = (
-            labeling_config.l2_reaction_judge_enabled or labeling_config.l3_judge_enabled
-        )
-        if old_path_judge_enabled:
+
+        if labeling_config.method == "judge_audit":
             judge_model, judge_model_settings = _labeling_model_for_agent(agent)
+            labels = await label_trajectory_with_judge_audit(
+                messages,
+                attacks=generated_attacks,
+                attack_score=attack_score,
+                message_judge_model=judge_model,
+                message_judge_model_settings=judge_model_settings,
+                judge_audit_settings=JudgeAuditSettings(
+                    max_attempts=labeling_config.judge_audit_max_attempts,
+                    prior_context_window=labeling_config.judge_audit_prior_window,
+                    judge_agent_messages_only=labeling_config.judge_audit_agent_messages_only,
+                ),
+            )
+        else:
+            old_path_judge_enabled = (
+                labeling_config.l2_reaction_judge_enabled
+                or labeling_config.l3_judge_enabled
+                or labeling_config.old_path_audit_enabled
+            )
+            if old_path_judge_enabled:
+                judge_model, judge_model_settings = _labeling_model_for_agent(agent)
 
-        l2_reaction_judge_model = judge_model if old_path_judge_enabled else None
-        l3_judge_model = judge_model if old_path_judge_enabled else None
+            l2_reaction_judge_model = judge_model if old_path_judge_enabled else None
+            l3_judge_model = judge_model if old_path_judge_enabled else None
+            old_path_audit_model = judge_model if labeling_config.old_path_audit_enabled else None
+            old_path_audit_rubric = None
+            if labeling_config.old_path_audit_enabled:
+                old_path_audit_rubric = labeling_config.old_path_audit_rubric.read_text(
+                    encoding="utf-8"
+                )
 
-        labels = await label_trajectory_async(
-            messages,
-            attacks=generated_attacks,
-            attack_score=attack_score,
-            l2_reaction_judge_model=l2_reaction_judge_model,
-            l2_reaction_judge_model_settings=judge_model_settings,
-            l2_reaction_threshold=labeling_config.l2_reaction_threshold,
-            l2_judge_model=l3_judge_model,
-            l2_judge_model_settings=judge_model_settings,
-            l2_threshold=labeling_config.l3_threshold,
-            l3_pattern_model=l3_judge_model,
-            l3_pattern_model_settings=judge_model_settings,
-            task_id=task_id,
-        )
+            labels = await label_trajectory_async(
+                messages,
+                attacks=generated_attacks,
+                attack_score=attack_score,
+                l2_reaction_judge_model=l2_reaction_judge_model,
+                l2_reaction_judge_model_settings=judge_model_settings,
+                l2_reaction_threshold=labeling_config.l2_reaction_threshold,
+                l2_judge_model=l3_judge_model,
+                l2_judge_model_settings=judge_model_settings,
+                l2_threshold=labeling_config.l3_threshold,
+                l3_pattern_model=l3_judge_model,
+                l3_pattern_model_settings=judge_model_settings,
+                old_path_audit_model=old_path_audit_model,
+                old_path_audit_model_settings=judge_model_settings,
+                old_path_audit_rubric=old_path_audit_rubric,
+                old_path_audit_max_attempts=labeling_config.old_path_audit_max_attempts,
+                task_id=task_id,
+            )
     except Exception as e:
         logfire.error(f"Failed to label trajectory; falling back to persistence labeling: {e}")
         return None

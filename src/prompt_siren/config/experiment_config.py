@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_ai.usage import UsageLimits
@@ -54,6 +54,14 @@ class ExecutionConfig(BaseModel):
 class TrajectoryLabelingConfig(BaseModel):
     """Configuration for trajectory uptake labeling."""
 
+    method: Literal["hybrid", "judge_audit"] = Field(
+        default="hybrid",
+        description=(
+            "Automatic trajectory labeling method. 'hybrid' uses rules plus old-path "
+            "L2/L3 semantic judges; 'judge_audit' uses the full L0-L5 judge-audit loop."
+        ),
+    )
+
     l2_reaction_judge_enabled: bool = Field(
         default=True,
         description="Use the agent model as an LLM judge for L2 reaction without uptake.",
@@ -76,6 +84,38 @@ class TrajectoryLabelingConfig(BaseModel):
         le=10.0,
         validation_alias=AliasChoices("l3_threshold", "l2_threshold"),
         description="Minimum LLM judge score required to label a message as L3.",
+    )
+
+    old_path_audit_enabled: bool = Field(
+        default=False,
+        description="Run a final LLM audit pass over hybrid labels using a markdown rubric.",
+    )
+    old_path_audit_rubric: Path = Field(
+        default=Path("docs/labeling/old_path_6level_rubric.md"),
+        description="Markdown rubric used by the old/hybrid path LLM audit judge.",
+    )
+    old_path_audit_max_attempts: int = Field(
+        default=2,
+        ge=1,
+        description="Maximum audit/relabel attempts per message for hybrid labels.",
+    )
+
+    judge_audit_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum LLM retries per message for the full L0-L5 judge-audit method.",
+    )
+    judge_audit_prior_window: int | None = Field(
+        default=6,
+        ge=0,
+        description=(
+            "Number of immediately preceding messages for full judge-audit, in addition "
+            "to the initial system/task context. Null means all prior messages."
+        ),
+    )
+    judge_audit_agent_messages_only: bool = Field(
+        default=True,
+        description="Only call the full judge-audit LLM for agent response messages.",
     )
 
     @property
