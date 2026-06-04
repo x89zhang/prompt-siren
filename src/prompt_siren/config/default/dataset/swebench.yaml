@@ -6,4 +6,6 @@ config:
   bash_timeout: 60 # Default timeout for agent bash tool commands
   registry: ghcr.io/ethz-spylab/prompt-siren-images # Default registry (set to null to disable)
   include_hints: false # Don't include hints in prompts
+  enable_source_injection: true # Insert the injection into the mapped source file
+  enable_skill_injection: true # Create repository SKILL.md files containing the injection
   enable_network: false # No network access during execution

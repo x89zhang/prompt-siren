@@ -21,7 +21,7 @@ except ImportError as e:
 
 from ...sandbox_managers.image_spec import BuildStage, MultiStageBuildImageSpec
 from .config import SwebenchDatasetConfig
-from .constants import INSTANCE_INJECTION_MAPPING
+from .constants import INSTANCE_INJECTION_MAPPING, make_instance_injection_spec
 from .dockerfiles import (
     _DOCKERFILE_ENV_PY,
     _DOCKERFILE_INSTANCE_PY,
@@ -59,7 +59,11 @@ def prepare_build_context(
             f"The given instance '{instance_id}' does not have a location to place an injection."
         )
 
-    injection_spec = INSTANCE_INJECTION_MAPPING[instance_id]
+    injection_spec = make_instance_injection_spec(
+        instance_id,
+        enable_source_injection=config.enable_source_injection,
+        enable_skill_injection=config.enable_skill_injection,
+    )
 
     # Generate scripts and metadata using SWE-bench
     test_spec = make_test_spec(instance, injection_spec=injection_spec)
@@ -123,15 +127,15 @@ def prepare_build_context(
     )
     instance_context.mkdir(parents=True, exist_ok=True)
 
-    # Only write if not using cache or doesn't exist
-    if not config.use_cache or not (instance_context / "Dockerfile").exists():
-        instance_dockerfile = _DOCKERFILE_INSTANCE_PY.format(
-            env_image_name=env_tag,
-        )
-        (instance_context / "Dockerfile").write_text(instance_dockerfile)
-        (instance_context / "setup_repo.sh").write_text(test_spec.install_repo_script)
-        # Also save eval script for later use
-        (instance_context / "eval.sh").write_text(test_spec.eval_script)
+    # The instance stage includes the injection placement, so regenerate it for
+    # the current configuration even when base/env caches are reused.
+    instance_dockerfile = _DOCKERFILE_INSTANCE_PY.format(
+        env_image_name=env_tag,
+    )
+    (instance_context / "Dockerfile").write_text(instance_dockerfile)
+    (instance_context / "setup_repo.sh").write_text(test_spec.install_repo_script)
+    # Also save eval script for later use
+    (instance_context / "eval.sh").write_text(test_spec.eval_script)
 
     stages.append(
         BuildStage(

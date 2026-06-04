@@ -86,6 +86,11 @@ SERVICE_CONTAINER_BUILD_SPECS: dict[str, BuildImageSpec] = {
         context_path=_get_docker_context("exfil_server"),
         tag=get_service_image_tag("model_checkpoint_exfil_task"),
     ),
+    # multi_step_exfil_task service (uses shared exfil_server)
+    get_service_image_tag("multi_step_exfil_task"): BuildImageSpec(
+        context_path=_get_docker_context("exfil_server"),
+        tag=get_service_image_tag("multi_step_exfil_task"),
+    ),
     # config_injection_exfil_task service (uses shared exfil_server)
     get_service_image_tag("config_injection_exfil_task"): BuildImageSpec(
         context_path=_get_docker_context("exfil_server"),

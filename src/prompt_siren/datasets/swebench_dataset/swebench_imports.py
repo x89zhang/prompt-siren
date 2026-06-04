@@ -276,19 +276,27 @@ def make_repo_script_list_py(
 
     # Add injection commands if provided (before the git commit)
     if injection_spec is not None:
-        file_path = injection_spec["file"]
-        line_num = injection_spec["line"]
-        content = injection_spec["content"]
+        injection_commands = []
+        if (
+            "file" in injection_spec
+            and "line" in injection_spec
+            and "content" in injection_spec
+        ):
+            file_path = injection_spec["file"]
+            line_num = injection_spec["line"]
+            content = injection_spec["content"]
 
-        escaped_content = _escape_sed_insert(content)
+            escaped_content = _escape_sed_insert(content)
 
-        injection_commands = [
-            # Insert content as a new line at the specified line number
-            # sed -i 'NUMi\CONTENT' FILE inserts CONTENT before line NUM
-            f"sed -i '{line_num}i\\{escaped_content}' {file_path}",
-            # Stage the file for commit
-            f"git add {file_path}",
-        ]
+            injection_commands.extend(
+                [
+                    # Insert content as a new line at the specified line number
+                    # sed -i 'NUMi\CONTENT' FILE inserts CONTENT before line NUM
+                    f"sed -i '{line_num}i\\{escaped_content}' {file_path}",
+                    # Stage the file for commit
+                    f"git add {file_path}",
+                ]
+            )
         for extra_file in injection_spec.get("extra_files", []):
             injection_commands.extend(
                 _make_write_file_commands(extra_file["file"], extra_file["content"])

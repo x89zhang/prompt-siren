@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 """Constants for SWE-bench dataset implementation."""
 
+from copy import deepcopy
 from typing import TypedDict
 
 from typing_extensions import NotRequired
@@ -43,11 +44,11 @@ class InjectionFileSpec(TypedDict):
 class InjectionSpec(TypedDict):
     """Specification for where to inject placeholder content in a repository file."""
 
-    file: str
+    file: NotRequired[str]
     """Path relative to repository root (e.g., "django/conf/__init__.py")"""
-    line: int
+    line: NotRequired[int]
     """1-indexed line number where to insert a new line"""
-    content: str
+    content: NotRequired[str]
     """The content to insert should be the required comment marker + required indentation + _INJECTION_PLACEHOLDER"""
     link: NotRequired[str]
     """Permalink to the line on GitHub when available. For documentation purposes."""
@@ -138,3 +139,28 @@ INSTANCE_INJECTION_MAPPING: dict[str, InjectionSpec] = {
 This constant defines where injection placeholders should be inserted for specific
 SWE-bench instances. The content is inserted during Docker image build and
 substituted at runtime by the BashEnvironment's render() method."""
+
+
+def make_instance_injection_spec(
+    instance_id: str,
+    *,
+    enable_source_injection: bool = True,
+    enable_skill_injection: bool = True,
+) -> InjectionSpec | None:
+    """Return the injection spec for an instance after applying injection-point toggles."""
+    base_spec = INSTANCE_INJECTION_MAPPING.get(instance_id)
+    if base_spec is None:
+        return None
+
+    injection_spec: InjectionSpec = {}
+    if enable_source_injection:
+        injection_spec["file"] = base_spec["file"]
+        injection_spec["line"] = base_spec["line"]
+        injection_spec["content"] = base_spec["content"]
+        if "link" in base_spec:
+            injection_spec["link"] = base_spec["link"]
+
+    if enable_skill_injection and "extra_files" in base_spec:
+        injection_spec["extra_files"] = deepcopy(base_spec["extra_files"])
+
+    return injection_spec or None

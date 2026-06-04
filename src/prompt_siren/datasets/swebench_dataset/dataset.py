@@ -32,7 +32,11 @@ from ...tasks import BenignTask, MaliciousTask, TaskCouple
 from ...types import InjectionVectorID, StrContentAttack
 from ..abstract import AbstractDataset
 from .config import SwebenchDatasetConfig
-from .constants import _INJECTION_PLACEHOLDER, INSTANCE_INJECTION_MAPPING
+from .constants import (
+    _INJECTION_PLACEHOLDER,
+    INSTANCE_INJECTION_MAPPING,
+    make_instance_injection_spec,
+)
 from .docker_builder import prepare_build_context
 from .evaluators import create_test_evaluator
 from .image_tags import get_benign_image_tag, get_pair_image_tag
@@ -235,7 +239,11 @@ def _prepare_benign_task_from_instance(
         raise RuntimeError(
             f"The given instance '{instance_id}' does not have a location to place an injection."
         )
-    injection_spec = INSTANCE_INJECTION_MAPPING[instance_id]
+    injection_spec = make_instance_injection_spec(
+        instance_id,
+        enable_source_injection=config.enable_source_injection,
+        enable_skill_injection=config.enable_skill_injection,
+    )
 
     # Generate test_spec for evaluation (needed for eval scripts)
     test_spec = make_test_spec(instance, injection_spec=injection_spec)

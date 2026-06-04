@@ -52,6 +52,12 @@ class SwebenchDatasetConfig(BaseModel):
     include_hints: bool = False
     """Whether to include hints_text variable in prompt templates."""
 
+    enable_source_injection: bool = True
+    """Whether to insert the injection placeholder into the mapped source file."""
+
+    enable_skill_injection: bool = True
+    """Whether to create repository skill files that contain the injection placeholder."""
+
     # Network configuration (passed to sandbox manager)
     enable_network: bool = False
     """Whether to enable network access in containers during task execution."""
