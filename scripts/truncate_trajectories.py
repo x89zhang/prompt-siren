@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create partial execution trajectories truncated at uptake-label points."""
+"""Create partial execution trajectories truncated at selected message points."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from prompt_siren.job.naming import sanitize_for_filename
 from prompt_siren.trajectory_labeling import label_trajectory, LEVEL_RANK, LEVELS, UptakeLevel
 
 CutSource = Literal["first_occurrence", "first_reach"]
+PayloadMatch = Literal["content", "vector_id", "content_or_vector_id"]
 
 
 def is_probably_execution_file(path: Path) -> bool:
@@ -84,6 +85,46 @@ def target_index(labels: dict[str, Any], level: UptakeLevel, cut_source: CutSour
         return None
     index = point.get("message_index")
     return index if isinstance(index, int) else None
+
+
+def attack_payload_texts(attacks: Any, match: PayloadMatch) -> list[str]:
+    if not isinstance(attacks, dict):
+        return []
+
+    needles: list[str] = []
+    for vector_id, attack in attacks.items():
+        if match in ("vector_id", "content_or_vector_id") and isinstance(vector_id, str):
+            needles.append(vector_id)
+        if match not in ("content", "content_or_vector_id") or not isinstance(attack, dict):
+            continue
+        content = attack.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        needles.append(content)
+        needles.extend(
+            line.strip()
+            for line in content.splitlines()
+            if len(line.strip()) >= 32
+        )
+
+    return sorted(dict.fromkeys(needles), key=len, reverse=True)
+
+
+def first_payload_exposure_index(
+    messages: list[Any],
+    attacks: Any,
+    *,
+    match: PayloadMatch,
+) -> int | None:
+    needles = attack_payload_texts(attacks, match)
+    if not needles:
+        return None
+
+    for index, message in enumerate(messages):
+        serialized = json.dumps(message, ensure_ascii=False)
+        if any(needle in serialized for needle in needles):
+            return index
+    return None
 
 
 def kept_message_count(index: int, include_trigger: bool) -> int:
@@ -154,19 +195,15 @@ def truncate_execution(
     execution: dict[str, Any],
     labels: dict[str, Any],
     *,
-    level: UptakeLevel,
-    cut_source: CutSource,
     keep_count: int,
     source_execution_path: Path,
+    truncation: dict[str, Any],
 ) -> dict[str, Any]:
     truncated = copy.deepcopy(execution)
     truncated["messages"] = truncated.get("messages", [])[:keep_count]
     truncated["trajectory_labels"] = truncate_labels(labels, keep_count)
-    truncated["truncation"] = {
+    truncated["truncation"] = truncation | {
         "source_execution_path": str(source_execution_path),
-        "target_level": level,
-        "cut_source": cut_source,
-        "include_trigger_message": keep_count > target_index(labels, level, cut_source),
         "kept_message_count": keep_count,
         "original_message_count": len(execution.get("messages", [])),
     }
@@ -178,10 +215,9 @@ def truncate_result(
     result: dict[str, Any] | None,
     *,
     execution: dict[str, Any],
-    level: UptakeLevel,
-    cut_source: CutSource,
     keep_count: int,
     source_execution_path: Path,
+    truncation: dict[str, Any],
 ) -> dict[str, Any]:
     truncated = copy.deepcopy(result) if result is not None else {}
     truncated["task_id"] = truncated.get("task_id") or execution.get("task_id")
@@ -192,10 +228,8 @@ def truncate_result(
     truncated["attack_score"] = None
     truncated["benign_score"] = None
     truncated["exception_info"] = None
-    truncated["truncation"] = {
+    truncated["truncation"] = truncation | {
         "source_execution_path": str(source_execution_path),
-        "target_level": level,
-        "cut_source": cut_source,
         "kept_message_count": keep_count,
     }
     return truncated
@@ -212,11 +246,10 @@ def output_run_dir(
     output_dir: Path,
     root: Path,
     execution_path: Path,
-    level: UptakeLevel,
-    cut_source: CutSource,
+    suffix: str,
 ) -> Path:
     relative_parent = execution_path.parent.relative_to(root)
-    return output_dir / relative_parent / f"{execution_path.parent.name}__truncated_{cut_source}_{level}"
+    return output_dir / relative_parent / f"{execution_path.parent.name}__truncated_{suffix}"
 
 
 def resume_ready_run_dir(
@@ -224,14 +257,13 @@ def resume_ready_run_dir(
     resume_job_dir: Path,
     execution: dict[str, Any],
     execution_path: Path,
-    level: UptakeLevel,
-    cut_source: CutSource,
+    suffix: str,
 ) -> Path:
     task_id = execution.get("task_id")
     if not isinstance(task_id, str) or not task_id:
         raise ValueError(f"Cannot build resume-ready path without task_id in {execution_path}")
     source_run_id = execution_path.parent.name
-    run_id = f"{source_run_id}__truncated_{cut_source}_{level}"
+    run_id = f"{source_run_id}__truncated_{suffix}"
     return resume_job_dir / sanitize_for_filename(task_id) / run_id
 
 
@@ -247,12 +279,55 @@ def ensure_resume_job_config(resume_job_dir: Path, execution_path: Path) -> Path
     return target_config
 
 
+def write_truncated_record(
+    *,
+    record: dict[str, Any],
+    truncated_execution: dict[str, Any],
+    truncated_result: dict[str, Any],
+    output_dir: Path | None,
+    resume_job_dir: Path | None,
+    root: Path,
+    execution_path: Path,
+    suffix: str,
+) -> dict[str, Any]:
+    if output_dir is not None:
+        run_dir = output_run_dir(
+            output_dir=output_dir,
+            root=root,
+            execution_path=execution_path,
+            suffix=suffix,
+        )
+        dump_json(run_dir / "execution.json", truncated_execution)
+        dump_json(run_dir / "result.json", truncated_result)
+        record["status"] = "written"
+        record["output_execution_path"] = str(run_dir / "execution.json")
+        record["output_result_path"] = str(run_dir / "result.json")
+
+    if resume_job_dir is not None:
+        ensure_resume_job_config(resume_job_dir, execution_path)
+        run_dir = resume_ready_run_dir(
+            resume_job_dir=resume_job_dir,
+            execution=truncated_execution,
+            execution_path=execution_path,
+            suffix=suffix,
+        )
+        truncated_execution["run_id"] = run_dir.name
+        dump_json(run_dir / "execution.json", truncated_execution)
+        record["status"] = "written_resume_ready"
+        record["resume_job_dir"] = str(resume_job_dir)
+        record["resume_execution_path"] = str(run_dir / "execution.json")
+
+    return record
+
+
 def truncate_one(
     execution_path: Path,
     *,
     levels: list[UptakeLevel],
     cut_source: CutSource,
     include_trigger: bool,
+    payload_offsets: list[int],
+    payload_match: PayloadMatch,
     output_dir: Path | None,
     resume_job_dir: Path | None,
     root: Path,
@@ -269,6 +344,7 @@ def truncate_one(
             records.append(
                 {
                     "source_execution_path": str(execution_path),
+                    "method": "label",
                     "target_level": level,
                     "cut_source": cut_source,
                     "status": "missing_level",
@@ -282,25 +358,31 @@ def truncate_one(
                 f"Invalid truncation count {keep_count} for {execution_path} at {level}"
             )
 
+        truncation = {
+            "method": "label",
+            "target_level": level,
+            "cut_source": cut_source,
+            "include_trigger_message": keep_count > target_index(labels, level, cut_source),
+        }
+        suffix = f"{cut_source}_{level}"
         truncated_execution = truncate_execution(
             execution,
             labels,
-            level=level,
-            cut_source=cut_source,
             keep_count=keep_count,
             source_execution_path=execution_path,
+            truncation=truncation,
         )
         truncated_result = truncate_result(
             result,
             execution=truncated_execution,
-            level=level,
-            cut_source=cut_source,
             keep_count=keep_count,
             source_execution_path=execution_path,
+            truncation=truncation,
         )
 
         record = {
             "source_execution_path": str(execution_path),
+            "method": "label",
             "target_level": level,
             "cut_source": cut_source,
             "trigger_message_index": index,
@@ -311,37 +393,103 @@ def truncate_one(
             ],
             "status": "planned",
         }
-
-        if output_dir is not None:
-            run_dir = output_run_dir(
+        records.append(
+            write_truncated_record(
+                record=record,
+                truncated_execution=truncated_execution,
+                truncated_result=truncated_result,
                 output_dir=output_dir,
+                resume_job_dir=resume_job_dir,
                 root=root,
                 execution_path=execution_path,
-                level=level,
-                cut_source=cut_source,
+                suffix=suffix,
             )
-            dump_json(run_dir / "execution.json", truncated_execution)
-            dump_json(run_dir / "result.json", truncated_result)
-            record["status"] = "written"
-            record["output_execution_path"] = str(run_dir / "execution.json")
-            record["output_result_path"] = str(run_dir / "result.json")
+        )
 
-        if resume_job_dir is not None:
-            ensure_resume_job_config(resume_job_dir, execution_path)
-            run_dir = resume_ready_run_dir(
+    exposure_index = first_payload_exposure_index(
+        messages,
+        execution.get("attacks"),
+        match=payload_match,
+    )
+    for offset in payload_offsets:
+        if exposure_index is None:
+            records.append(
+                {
+                    "source_execution_path": str(execution_path),
+                    "method": "payload_exposure",
+                    "payload_offset": offset,
+                    "payload_match": payload_match,
+                    "status": "missing_payload_exposure",
+                }
+            )
+            continue
+
+        target_message_index = exposure_index + offset
+        keep_count = target_message_index + 1
+        if keep_count < 0 or keep_count > len(messages):
+            records.append(
+                {
+                    "source_execution_path": str(execution_path),
+                    "method": "payload_exposure",
+                    "payload_offset": offset,
+                    "payload_match": payload_match,
+                    "payload_exposure_message_index": exposure_index,
+                    "target_message_index": target_message_index,
+                    "original_message_count": len(messages),
+                    "status": "offset_out_of_range",
+                }
+            )
+            continue
+
+        truncation = {
+            "method": "payload_exposure",
+            "payload_match": payload_match,
+            "payload_offset": offset,
+            "payload_exposure_message_index": exposure_index,
+            "target_message_index": target_message_index,
+        }
+        suffix = f"payload_exposure_after_{offset}"
+        truncated_execution = truncate_execution(
+            execution,
+            labels,
+            keep_count=keep_count,
+            source_execution_path=execution_path,
+            truncation=truncation,
+        )
+        truncated_result = truncate_result(
+            result,
+            execution=truncated_execution,
+            keep_count=keep_count,
+            source_execution_path=execution_path,
+            truncation=truncation,
+        )
+
+        record = {
+            "source_execution_path": str(execution_path),
+            "method": "payload_exposure",
+            "payload_offset": offset,
+            "payload_match": payload_match,
+            "payload_exposure_message_index": exposure_index,
+            "target_message_index": target_message_index,
+            "kept_message_count": keep_count,
+            "original_message_count": len(messages),
+            "truncated_trajectory_level": truncated_execution["trajectory_labels"][
+                "trajectory_level"
+            ],
+            "status": "planned",
+        }
+        records.append(
+            write_truncated_record(
+                record=record,
+                truncated_execution=truncated_execution,
+                truncated_result=truncated_result,
+                output_dir=output_dir,
                 resume_job_dir=resume_job_dir,
-                execution=truncated_execution,
+                root=root,
                 execution_path=execution_path,
-                level=level,
-                cut_source=cut_source,
+                suffix=suffix,
             )
-            truncated_execution["run_id"] = run_dir.name
-            dump_json(run_dir / "execution.json", truncated_execution)
-            record["status"] = "written_resume_ready"
-            record["resume_job_dir"] = str(resume_job_dir)
-            record["resume_execution_path"] = str(run_dir / "execution.json")
-
-        records.append(record)
+        )
 
     return records
 
@@ -353,9 +501,19 @@ def parse_level(value: str) -> UptakeLevel:
     return normalized  # type: ignore[return-value]
 
 
+def parse_payload_offset(value: str) -> int:
+    try:
+        offset = int(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("payload offset must be an integer") from e
+    if offset < 0:
+        raise argparse.ArgumentTypeError("payload offset must be non-negative")
+    return offset
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Truncate Prompt Siren execution trajectories at uptake-label points."
+        description="Truncate Prompt Siren execution trajectories at selected message points."
     )
     parser.add_argument(
         "paths",
@@ -382,6 +540,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Drop the trigger message instead of truncating immediately after it.",
     )
     parser.add_argument(
+        "--skip-labels",
+        action="store_true",
+        help="Do not create the default label-based truncations.",
+    )
+    parser.add_argument(
+        "--payload-offsets",
+        nargs="+",
+        type=parse_payload_offset,
+        default=[],
+        help=(
+            "Create truncations at the first payload exposure plus each offset. "
+            "Offset 0 keeps through the exposure message; offset 1 keeps one later message."
+        ),
+    )
+    parser.add_argument(
+        "--payload-match",
+        choices=("content", "vector_id", "content_or_vector_id"),
+        default="content",
+        help="What to search for when finding the first payload exposure.",
+    )
+    parser.add_argument(
         "-o",
         "--output-dir",
         type=Path,
@@ -404,14 +583,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     execution_paths = find_execution_paths(args.paths)
     root = common_root(execution_paths)
+    levels = [] if args.skip_labels else args.levels
     records: list[dict[str, Any]] = []
     for execution_path in execution_paths:
         records.extend(
             truncate_one(
                 execution_path,
-                levels=args.levels,
+                levels=levels,
                 cut_source=args.cut_source,
                 include_trigger=not args.before_trigger,
+                payload_offsets=args.payload_offsets,
+                payload_match=args.payload_match,
                 output_dir=args.output_dir,
                 resume_job_dir=args.resume_job_dir,
                 root=root,
