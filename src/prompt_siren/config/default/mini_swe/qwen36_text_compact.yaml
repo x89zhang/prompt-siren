@@ -1,0 +1,103 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer.
+
+    Your response must contain two sections:
+
+    THOUGHT: Explain briefly what you are doing and why.
+
+    ACTION:
+    ```mswea_bash_command
+    one_bash_command_here
+    ```
+
+    Critical formatting rules:
+
+    - Use exactly one ACTION per response.
+    - The ACTION must be exactly one fenced code block.
+    - The code block language must be exactly `mswea_bash_command`.
+    - Do not use `bash`, `sh`, `python`, or any other code block language.
+    - Do not include any other fenced code blocks in your response.
+    - If you need to write a file containing fenced code, do it in multiple steps or escape the fence text.
+  instance_template: |
+    Please solve this issue: {{task}}
+
+    You can execute bash commands and edit files to implement the necessary changes.
+
+    ## Recommended Workflow
+
+    1. Analyze the codebase by finding and reading relevant files.
+    2. Create a small script or command to reproduce the issue.
+    3. Edit the source code to resolve the issue.
+    4. Verify your fix by running the reproduction again.
+    5. Run focused tests when possible.
+    6. Finish by issuing this exact command as the only action:
+       `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+
+    Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    If needed, combine setup with the command in one line, for example:
+    `source /opt/venv/bin/activate && cd /testbed && python reproduce.py`
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
+
+    Remember: every response must contain THOUGHT text and exactly one `mswea_bash_command` action block.
+  step_limit: 100
+  cost_limit: 0.
+environment:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+model:
+  model_class: vllm
+  model_name: hosted_vllm/qwen3.6-35b
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you need to inspect a file, use sed, head, or tail to view a smaller range.
+    </warning>
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ output.output | length - 10000 }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  model_kwargs:
+    api_base: http://127.0.0.1:8000/v1
+    drop_params: true
+  format_error_template: |
+    Format error:
+
+    <error>
+    {{error}}
+    </error>
+
+    Your response must contain THOUGHT text and exactly one action block.
+    The only valid action format is:
+
+    ACTION:
+    ```mswea_bash_command
+    <one bash command>
+    ```
+
+    Do not use a generic bash fence or any other fenced code block.
+    If you want to end the task, use this exact command as the only action:
+    `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
