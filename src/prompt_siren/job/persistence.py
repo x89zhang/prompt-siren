@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections import Counter
 from collections.abc import Mapping
@@ -19,17 +20,24 @@ from pydantic_ai.usage import RunUsage
 
 from ..attack_success_cases import record_attack_success_case
 from ..tasks import EvaluationResult, Task, TaskCouple
-from ..trajectory_labeling import label_trajectory, TrajectoryLabels, UptakeLevel
-from ..types import InjectionAttack, InjectionAttacksDictTypeAdapter
+from ..trajectory_labeling import label_trajectory, LEVEL_RANK, TrajectoryLabels, UptakeLevel
+from ..types import (
+    InjectableModelMessagesTypeAdapter,
+    InjectionAttack,
+    InjectionAttacksDictTypeAdapter,
+)
 from .models import (
     CONFIG_FILENAME,
     ExceptionInfo,
     INDEX_FILENAME,
     JobConfig,
     RunIndexEntry,
+    TASK_ATTACK_CHAIN_FILENAME,
     TASK_EXECUTION_FILENAME,
+    TASK_EXECUTION_METADATA_FILENAME,
     TASK_RESULT_FILENAME,
     TaskRunExecution,
+    TaskRunExecutionMetadata,
     TaskRunResult,
     TaskRunResumeState,
 )
@@ -48,7 +56,9 @@ class JobPersistence:
             <task_id>/
                 <run_id>/            # 8-char UUID
                     result.json      # Task run result
-                    execution.json   # Full execution data
+                    execution.json   # Raw execution trace and checkpoint
+                    execution_metadata.json  # Attacks and trajectory labels
+                    attack_chain.json  # Non-L0 messages extracted from trace
                 <run_id>/
                     ...
     """
@@ -144,17 +154,96 @@ class JobPersistence:
             attacks=attacks_dict,
             resume_state=resume_state,
         )
-        execution_path = run_dir / TASK_EXECUTION_FILENAME
-        tmp_path = execution_path.with_suffix(f"{execution_path.suffix}.tmp")
-        with open(tmp_path, "w") as f:
-            f.write(execution.model_dump_json(indent=2))
-        tmp_path.replace(execution_path)
+        self._save_execution_files(
+            run_dir,
+            execution,
+            attacks=attacks_dict,
+            trajectory_labels=None,
+        )
         return run_dir
 
     def load_execution(self, task_id: str, run_id: str) -> TaskRunExecution:
         """Load execution data for a task run."""
-        execution_path = self.get_task_run_dir(task_id, run_id) / TASK_EXECUTION_FILENAME
-        return TaskRunExecution.model_validate_json(execution_path.read_text())
+        run_dir = self.get_task_run_dir(task_id, run_id)
+        execution_path = run_dir / TASK_EXECUTION_FILENAME
+        execution = TaskRunExecution.model_validate_json(execution_path.read_text())
+
+        metadata_path = run_dir / TASK_EXECUTION_METADATA_FILENAME
+        if not metadata_path.exists():
+            return execution
+
+        metadata = TaskRunExecutionMetadata.model_validate_json(metadata_path.read_text())
+        return execution.model_copy(
+            update={
+                "attacks": metadata.attacks,
+                "trajectory_labels": metadata.trajectory_labels,
+            }
+        )
+
+    def _save_execution_files(
+        self,
+        run_dir: Path,
+        execution: TaskRunExecution,
+        *,
+        attacks: dict[str, Any] | None,
+        trajectory_labels: dict[str, Any] | None,
+    ) -> None:
+        execution_path = run_dir / TASK_EXECUTION_FILENAME
+        tmp_path = execution_path.with_suffix(f"{execution_path.suffix}.tmp")
+        with open(tmp_path, "w") as f:
+            f.write(
+                execution.model_dump_json(
+                    indent=2,
+                    exclude={"attacks", "trajectory_labels"},
+                )
+            )
+        tmp_path.replace(execution_path)
+
+        metadata_path = run_dir / TASK_EXECUTION_METADATA_FILENAME
+        if attacks is None and trajectory_labels is None:
+            return
+
+        metadata = TaskRunExecutionMetadata(
+            task_id=execution.task_id,
+            run_id=execution.run_id,
+            execution_id=execution.execution_id,
+            timestamp=execution.timestamp,
+            trace_id=execution.trace_id,
+            span_id=execution.span_id,
+            attacks=attacks,
+            trajectory_labels=trajectory_labels,
+        )
+        tmp_metadata_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
+        with open(tmp_metadata_path, "w") as f:
+            f.write(metadata.model_dump_json(indent=2))
+        tmp_metadata_path.replace(metadata_path)
+
+        if trajectory_labels is not None:
+            self._save_attack_chain_file(run_dir, execution, trajectory_labels)
+
+    def _save_attack_chain_file(
+        self,
+        run_dir: Path,
+        execution: TaskRunExecution,
+        trajectory_labels: dict[str, Any],
+    ) -> None:
+        attack_chain = {
+            "task_id": execution.task_id,
+            "run_id": execution.run_id,
+            "execution_id": execution.execution_id,
+            "timestamp": execution.timestamp.isoformat(),
+            "trace_id": execution.trace_id,
+            "span_id": execution.span_id,
+            "trajectory_level": trajectory_labels.get("trajectory_level"),
+            "messages": _extract_attack_chain_messages(execution.messages, trajectory_labels),
+        }
+        attack_chain_path = run_dir / TASK_ATTACK_CHAIN_FILENAME
+        tmp_attack_chain_path = attack_chain_path.with_suffix(
+            f"{attack_chain_path.suffix}.tmp"
+        )
+        with open(tmp_attack_chain_path, "w") as f:
+            json.dump(attack_chain, f, indent=2)
+        tmp_attack_chain_path.replace(attack_chain_path)
 
     def list_incomplete_run_ids(self, task_id: str) -> list[str]:
         """Return run IDs with execution data but no final result for a task/couple."""
@@ -281,9 +370,12 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=trajectory_labels.to_json(),
         )
-        execution_path = run_dir / TASK_EXECUTION_FILENAME
-        with open(execution_path, "w") as f:
-            f.write(execution.model_dump_json(indent=2))
+        self._save_execution_files(
+            run_dir,
+            execution,
+            attacks=attacks_dict,
+            trajectory_labels=trajectory_labels.to_json(),
+        )
 
         # Update index
         self._append_to_index(
@@ -400,9 +492,12 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=trajectory_labels.to_json(),
         )
-        execution_path = run_dir / TASK_EXECUTION_FILENAME
-        with open(execution_path, "w") as f:
-            f.write(execution.model_dump_json(indent=2))
+        self._save_execution_files(
+            run_dir,
+            execution,
+            attacks=attacks_dict,
+            trajectory_labels=trajectory_labels.to_json(),
+        )
 
         # Update index
         self._append_to_index(
@@ -530,6 +625,74 @@ class JobPersistence:
             with open(index_path, "w") as f:
                 for entry in filtered_entries:
                     f.write(entry.model_dump_json() + "\n")
+
+
+def _extract_attack_chain_messages(
+    messages: list[ModelMessage],
+    trajectory_labels: dict[str, Any],
+) -> list[dict[str, Any]]:
+    labeled_messages = trajectory_labels.get("messages")
+    if not isinstance(labeled_messages, list):
+        return []
+
+    attack_chain_messages: list[dict[str, Any]] = []
+    for label in labeled_messages:
+        if not isinstance(label, dict):
+            continue
+        message_level = label.get("message_level")
+        if not isinstance(message_level, str):
+            continue
+        if LEVEL_RANK.get(message_level, 0) <= LEVEL_RANK["L0"]:
+            continue
+
+        message_index = label.get("message_index")
+        if not isinstance(message_index, int):
+            continue
+        if message_index < 0 or message_index >= len(messages):
+            continue
+
+        message = InjectableModelMessagesTypeAdapter.dump_python(
+            [messages[message_index]],
+            mode="json",
+        )[0]
+        attack_chain_messages.append(
+            {
+                "message_index": message_index,
+                "message_level": message_level,
+                "evidence": label.get("evidence", []),
+                "message_kind": message.get("kind"),
+                "timestamp": message.get("timestamp"),
+                "parts": _extract_message_parts(message),
+            }
+        )
+
+    return attack_chain_messages
+
+
+def _extract_message_parts(message: dict[str, Any]) -> list[dict[str, Any]]:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return []
+
+    extracted_parts: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+
+        extracted: dict[str, Any] = {"part_kind": part.get("part_kind")}
+        for key in (
+            "content",
+            "args",
+            "tool_name",
+            "tool_call_id",
+            "outcome",
+            "timestamp",
+        ):
+            if key in part:
+                extracted[key] = part[key]
+        extracted_parts.append(extracted)
+
+    return extracted_parts
 
 
 def _success_case_model_name(job_config: JobConfig) -> str:

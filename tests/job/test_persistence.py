@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 """Tests for JobPersistence class."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -17,8 +18,11 @@ from prompt_siren.job.models import (
     CONFIG_FILENAME,
     INDEX_FILENAME,
     JobConfig,
+    TASK_ATTACK_CHAIN_FILENAME,
+    TASK_EXECUTION_METADATA_FILENAME,
     TASK_RESULT_FILENAME,
     TaskRunExecution,
+    TaskRunExecutionMetadata,
     TaskRunResult,
     TaskRunResumeState,
 )
@@ -126,10 +130,25 @@ class TestSaveTaskRun:
         assert loaded.benign_score == 0.85
         assert loaded.trajectory_level == "L0"
 
+        raw_execution = TaskRunExecution.model_validate_json(
+            (run_dir / "execution.json").read_text()
+        )
+        assert raw_execution.trajectory_labels is None
+        assert raw_execution.attacks is None
+
+        metadata = TaskRunExecutionMetadata.model_validate_json(
+            (run_dir / TASK_EXECUTION_METADATA_FILENAME).read_text()
+        )
+        assert metadata.trajectory_labels is not None
+        assert metadata.trajectory_labels["trajectory_level"] == "L0"
+        assert metadata.trajectory_labels["messages"][0]["message_level"] == "L0"
+
+        attack_chain = json.loads((run_dir / TASK_ATTACK_CHAIN_FILENAME).read_text())
+        assert attack_chain["trajectory_level"] == "L0"
+        assert attack_chain["messages"] == []
+
         execution = job_persistence.load_execution("task1", loaded.run_id)
-        assert execution.trajectory_labels is not None
-        assert execution.trajectory_labels["trajectory_level"] == "L0"
-        assert execution.trajectory_labels["messages"][0]["message_level"] == "L0"
+        assert execution.trajectory_labels == metadata.trajectory_labels
 
     def test_appends_entry_to_index(
         self, job_persistence: JobPersistence, mock_task_span: MagicMock
@@ -195,10 +214,30 @@ class TestSaveCoupleRun:
         assert loaded.attack_score == 0.3
         assert loaded.trajectory_level == "L5"
 
+        raw_execution = TaskRunExecution.model_validate_json(
+            (run_dir / "execution.json").read_text()
+        )
+        assert raw_execution.trajectory_labels is None
+        assert raw_execution.attacks is None
+
+        metadata = TaskRunExecutionMetadata.model_validate_json(
+            (run_dir / TASK_EXECUTION_METADATA_FILENAME).read_text()
+        )
+        assert metadata.trajectory_labels is not None
+        assert metadata.trajectory_labels["trajectory_level"] == "L5"
+        assert metadata.trajectory_labels["messages"][-1]["message_level"] == "L5"
+
+        attack_chain = json.loads((run_dir / TASK_ATTACK_CHAIN_FILENAME).read_text())
+        assert attack_chain["trajectory_level"] == "L5"
+        assert len(attack_chain["messages"]) == 1
+        chain_message = attack_chain["messages"][0]
+        assert chain_message["message_index"] == 0
+        assert chain_message["message_level"] == "L5"
+        assert chain_message["message_kind"] == "response"
+        assert chain_message["parts"][0]["content"] == "response"
+
         execution = job_persistence.load_execution(couple.id, loaded.run_id)
-        assert execution.trajectory_labels is not None
-        assert execution.trajectory_labels["trajectory_level"] == "L5"
-        assert execution.trajectory_labels["messages"][-1]["message_level"] == "L5"
+        assert execution.trajectory_labels == metadata.trajectory_labels
 
     def test_records_successful_attack_case(
         self,

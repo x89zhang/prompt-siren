@@ -68,6 +68,19 @@ class TaskRunExecution(BaseModel):
     resume_state: TaskRunResumeState | None = None
 
 
+class TaskRunExecutionMetadata(BaseModel):
+    """Analysis metadata associated with a task run execution."""
+
+    task_id: str
+    run_id: str
+    execution_id: str
+    timestamp: datetime
+    trace_id: str | None = None
+    span_id: str | None = None
+    attacks: dict[str, Any] | None = None
+    trajectory_labels: dict[str, Any] | None = None
+
+
 class TaskRunResumeState(BaseModel):
     """Serializable state-machine checkpoint for resuming an in-progress run."""
 
@@ -111,3 +124,5 @@ RESULT_FILENAME = "result.json"
 INDEX_LOCK_FILENAME = "index.jsonl.lock"
 TASK_RESULT_FILENAME = "result.json"
 TASK_EXECUTION_FILENAME = "execution.json"
+TASK_EXECUTION_METADATA_FILENAME = "execution_metadata.json"
+TASK_ATTACK_CHAIN_FILENAME = "attack_chain.json"
