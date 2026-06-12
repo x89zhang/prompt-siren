@@ -15,7 +15,13 @@ import logfire
 import yaml
 from filelock import FileLock
 from logfire import LogfireSpan
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.usage import RunUsage
 
 from ..attack_success_cases import record_attack_success_case
@@ -23,6 +29,7 @@ from ..tasks import EvaluationResult, Task, TaskCouple
 from ..trajectory_labeling import label_trajectory, LEVEL_RANK, TrajectoryLabels, UptakeLevel
 from ..types import (
     InjectableModelMessagesTypeAdapter,
+    InjectableToolReturnPart,
     InjectionAttack,
     InjectionAttacksDictTypeAdapter,
 )
@@ -36,10 +43,15 @@ from .models import (
     TASK_EXECUTION_FILENAME,
     TASK_EXECUTION_METADATA_FILENAME,
     TASK_RESULT_FILENAME,
+    TASK_TOOL_HISTORY_FILENAME,
+    TASK_TOOL_REPLAY_FILENAME,
     TaskRunExecution,
     TaskRunExecutionMetadata,
     TaskRunResult,
     TaskRunResumeState,
+    TaskRunToolHistory,
+    TaskRunToolReplay,
+    ToolHistoryEntry,
 )
 from .naming import sanitize_for_filename
 
@@ -75,6 +87,7 @@ class JobPersistence:
         self.resume_partial_in_place = False
         self.resume_only_partial = False
         self.resume_partial_repeats = 1
+        self.resume_replay_tool_history = True
 
     @classmethod
     def create(cls, job_dir: Path, job_config: JobConfig) -> JobPersistence:
@@ -180,6 +193,31 @@ class JobPersistence:
             }
         )
 
+    def save_tool_replay(self, replay: TaskRunToolReplay) -> Path:
+        """Save tool-history replay audit data for a resumed run."""
+        run_dir = self.get_task_run_dir(replay.task_id, replay.run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        replay_path = run_dir / TASK_TOOL_REPLAY_FILENAME
+        tmp_path = replay_path.with_suffix(f"{replay_path.suffix}.tmp")
+        with open(tmp_path, "w") as f:
+            f.write(replay.model_dump_json(indent=2))
+        tmp_path.replace(replay_path)
+        return replay_path
+
+    def _save_tool_history_file(self, run_dir: Path, execution: TaskRunExecution) -> None:
+        history = TaskRunToolHistory(
+            task_id=execution.task_id,
+            run_id=execution.run_id,
+            execution_id=execution.execution_id,
+            timestamp=execution.timestamp,
+            entries=_extract_tool_history_entries(execution.messages),
+        )
+        history_path = run_dir / TASK_TOOL_HISTORY_FILENAME
+        tmp_path = history_path.with_suffix(f"{history_path.suffix}.tmp")
+        with open(tmp_path, "w") as f:
+            f.write(history.model_dump_json(indent=2))
+        tmp_path.replace(history_path)
+
     def _save_execution_files(
         self,
         run_dir: Path,
@@ -198,6 +236,7 @@ class JobPersistence:
                 )
             )
         tmp_path.replace(execution_path)
+        self._save_tool_history_file(run_dir, execution)
 
         metadata_path = run_dir / TASK_EXECUTION_METADATA_FILENAME
         if attacks is None and trajectory_labels is None:
@@ -625,6 +664,38 @@ class JobPersistence:
             with open(index_path, "w") as f:
                 for entry in filtered_entries:
                     f.write(entry.model_dump_json() + "\n")
+
+
+def _return_message_indexes_by_tool_call_id(messages: list[ModelMessage]) -> dict[str, int]:
+    indexes: dict[str, int] = {}
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, ModelRequest):
+            continue
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart | InjectableToolReturnPart):
+                indexes[part.tool_call_id] = message_index
+    return indexes
+
+
+def _extract_tool_history_entries(messages: list[ModelMessage]) -> list[ToolHistoryEntry]:
+    return_indexes = _return_message_indexes_by_tool_call_id(messages)
+    entries: list[ToolHistoryEntry] = []
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, ModelResponse):
+            continue
+        entries.extend(
+            ToolHistoryEntry(
+                message_index=message_index,
+                tool_call_id=part.tool_call_id,
+                tool_name=part.tool_name,
+                args=part.args_as_dict(),
+                completed=part.tool_call_id in return_indexes,
+                return_message_index=return_indexes.get(part.tool_call_id),
+            )
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        )
+    return entries
 
 
 def _extract_attack_chain_messages(

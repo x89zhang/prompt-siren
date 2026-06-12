@@ -125,6 +125,7 @@ class Job:
         resume_partial_in_place: bool = False,
         resume_only_partial: bool = True,
         resume_partial_repeats: int = 1,
+        resume_replay_tool_history: bool = True,
     ) -> Job:
         """Resume an existing job from its directory.
 
@@ -136,6 +137,7 @@ class Job:
             resume_partial_in_place: Write resumed execution back into the original run dir
             resume_only_partial: Run only incomplete checkpoints instead of filling n_runs_per_task
             resume_partial_repeats: Number of times to resume each incomplete checkpoint
+            resume_replay_tool_history: Replay completed historical tool calls before resume
 
         Returns:
             Job instance configured for resumption
@@ -160,6 +162,7 @@ class Job:
         job.persistence.resume_partial_in_place = resume_partial_in_place
         job.persistence.resume_only_partial = resume_only_partial
         job.persistence.resume_partial_repeats = resume_partial_repeats
+        job.persistence.resume_replay_tool_history = resume_replay_tool_history
 
         # Handle retry logic
         job._cleanup_for_retry(retry_on_errors, resume_partial=resume_partial)

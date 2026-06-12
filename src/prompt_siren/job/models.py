@@ -91,6 +91,52 @@ class TaskRunResumeState(BaseModel):
     )
 
 
+class ToolReplayEntry(BaseModel):
+    """One completed historical tool call replayed before resuming a checkpoint."""
+
+    message_index: int
+    tool_call_id: str | None = None
+    tool_name: str
+    args: dict[str, Any]
+    replayed_at: datetime
+    outcome: Literal["success", "retry", "error"]
+    result_preview: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+
+
+class TaskRunToolReplay(BaseModel):
+    """Audit record for tool-history replay performed before partial resume."""
+
+    task_id: str
+    run_id: str
+    source_run_id: str
+    source_execution_id: str
+    replayed_at: datetime
+    entries: list[ToolReplayEntry]
+
+
+class ToolHistoryEntry(BaseModel):
+    """Tool call extracted from execution message history."""
+
+    message_index: int
+    tool_call_id: str | None = None
+    tool_name: str
+    args: dict[str, Any]
+    completed: bool
+    return_message_index: int | None = None
+
+
+class TaskRunToolHistory(BaseModel):
+    """Tool-call history extracted from an execution trace."""
+
+    task_id: str
+    run_id: str
+    execution_id: str
+    timestamp: datetime
+    entries: list[ToolHistoryEntry]
+
+
 class JobConfig(ExperimentConfig):
     """Snapshot of the experiment configuration for a job.
 
@@ -126,3 +172,5 @@ TASK_RESULT_FILENAME = "result.json"
 TASK_EXECUTION_FILENAME = "execution.json"
 TASK_EXECUTION_METADATA_FILENAME = "execution_metadata.json"
 TASK_ATTACK_CHAIN_FILENAME = "attack_chain.json"
+TASK_TOOL_REPLAY_FILENAME = "tool_replay.json"
+TASK_TOOL_HISTORY_FILENAME = "tool_history.json"

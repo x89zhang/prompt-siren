@@ -138,6 +138,31 @@ class TestJobsResumeCommand:
         call_kwargs = mock_resume.call_args.kwargs
         assert call_kwargs.get("retry_on_errors") == ["CancelledError"]
         assert call_kwargs.get("resume_partial_in_place") is False
+        assert call_kwargs.get("resume_replay_tool_history") is True
+
+    def test_resume_no_replay_tool_history_flag(
+        self, cli_runner: CliRunner, mock_job_config: JobConfig, tmp_path: Path
+    ):
+        """Test that --no-replay-tool-history disables partial tool replay."""
+        job_dir = tmp_path / "test_job"
+        job_dir.mkdir()
+        _save_config_yaml(job_dir / "config.yaml", mock_job_config)
+
+        async def mock_run_benign(experiment_config, job=None):
+            return {}
+
+        with (
+            patch.object(Job, "resume", wraps=Job.resume) as mock_resume,
+            patch("prompt_siren.cli.run_benign_experiment", mock_run_benign),
+        ):
+            result = cli_runner.invoke(
+                main,
+                ["jobs", "resume", "-p", str(job_dir), "--no-replay-tool-history"],
+            )
+
+        assert result.exit_code == 0, f"CLI failed: {result.output}"
+        call_kwargs = mock_resume.call_args.kwargs
+        assert call_kwargs.get("resume_replay_tool_history") is False
 
     def test_resume_in_place_flag(
         self, cli_runner: CliRunner, mock_job_config: JobConfig, tmp_path: Path

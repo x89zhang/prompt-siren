@@ -18,11 +18,15 @@ from pydantic_ai.messages import (
     ModelResponse,
     SystemPromptPart,
     TextPart,
+    ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import Tool
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 # ExceptionGroup/BaseExceptionGroup are built-in in Python 3.11+, needs backport for 3.10
@@ -47,6 +51,7 @@ from prompt_siren.job.models import (
     TaskRunResumeState,
 )
 from prompt_siren.run import (
+    _replay_completed_tool_history,
     run_single_tasks_without_attack,
     run_task_couples_with_attack,
 )
@@ -234,6 +239,88 @@ class TestRunBenignTasks:
         assert len(run_dirs) == 2
         completed_dirs = [path for path in run_dirs if (path / "result.json").exists()]
         assert len(completed_dirs) == 1
+
+    async def test_resume_replays_completed_tool_calls_only(
+        self, mock_environment: MockEnvironment, tmp_path
+    ):
+        """Partial resume replays completed tool calls, but not the pending one."""
+        calls: list[str] = []
+
+        async def record_tool(ctx, command: str) -> str:
+            calls.append(command)
+            ctx.deps.value += f"|{command}"
+            return f"ran {command}"
+
+        toolsets = [FunctionToolset([Tool(record_tool, takes_ctx=True, name="bash")])]
+        task = create_mock_benign_task("test_task", {"eval1": 1.0})
+        experiment_config = ExperimentConfig(
+            agent=AgentConfig(type="plain", config={"model": "test"}),
+            dataset=DatasetConfig(type="mock", config={}),
+        )
+        job = Job.create(
+            experiment_config=experiment_config,
+            execution_mode="benign",
+            jobs_dir=tmp_path,
+            job_name="test_job",
+            agent_name="test",
+        )
+        source_run_id, _ = job.persistence.create_task_run_dir(task.id)
+        run_id, run_dir = job.persistence.create_task_run_dir(task.id)
+        completed_call = ToolCallPart(
+            tool_name="bash",
+            args={"command": "completed"},
+            tool_call_id="call_completed",
+        )
+        pending_call = ToolCallPart(
+            tool_name="bash",
+            args={"command": "pending"},
+            tool_call_id="call_pending",
+        )
+        job.persistence.save_partial_execution(
+            task_id=task.id,
+            run_id=source_run_id,
+            messages=[
+                ModelResponse(parts=[completed_call]),
+                ModelRequest(
+                    parts=[
+                        ToolReturnPart(
+                            tool_name="bash",
+                            content="ran completed",
+                            tool_call_id="call_completed",
+                        )
+                    ]
+                ),
+                ModelResponse(parts=[pending_call]),
+            ],
+            usage=RunUsage(),
+            task_span=MagicMock(get_span_context=lambda: None),
+            resume_state=TaskRunResumeState(state_kind="model_response"),
+        )
+        source_run_dir = job.persistence.get_task_run_dir(task.id, source_run_id)
+        source_history_text = (source_run_dir / "tool_history.json").read_text()
+        assert "call_completed" in source_history_text
+        assert "call_pending" in source_history_text
+        assert '"completed": true' in source_history_text
+        assert '"completed": false' in source_history_text
+        execution = job.persistence.load_execution(task.id, source_run_id)
+
+        async with mock_environment.create_task_context(task) as env_state:
+            await _replay_completed_tool_history(
+                persistence=job.persistence,
+                task_id=task.id,
+                run_id=run_id,
+                source_run_id=source_run_id,
+                execution=execution,
+                env_state=env_state,
+                toolsets=toolsets,
+            )
+            assert env_state.value.endswith("|completed")
+
+        assert calls == ["completed"]
+        replay_path = run_dir / "tool_replay.json"
+        assert replay_path.exists()
+        assert "call_completed" in replay_path.read_text()
+        assert "call_pending" not in replay_path.read_text()
 
     async def test_run_benign_tasks_error_handling(
         self, mock_environment: MockEnvironment, mock_dataset: MockDataset

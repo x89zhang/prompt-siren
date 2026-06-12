@@ -7,9 +7,17 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    SystemPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 
 # ExceptionGroup is built-in in Python 3.11+, needs backport for 3.10
 if sys.version_info < (3, 11):
@@ -37,7 +45,7 @@ from .agents.states import (
 from .attacks.abstract import AbstractAttack
 from .environments.abstract import AbstractEnvironment
 from .job import JobPersistence
-from .job.models import TaskRunExecution, TaskRunResumeState
+from .job.models import TaskRunExecution, TaskRunResumeState, TaskRunToolReplay, ToolReplayEntry
 from .providers import infer_model
 from .tasks import (
     BenignTask,
@@ -49,13 +57,19 @@ from .tasks import (
 )
 from .telemetry.formatted_span import formatted_span
 from .telemetry.workbench_spans import create_attack_span, create_task_span
+from .tools_utils import run_tool_raw
 from .trajectory_labeling import (
     JudgeAuditSettings,
     label_trajectory_async,
     label_trajectory_with_judge_audit,
     TrajectoryLabels,
 )
-from .types import InjectionAttack, InjectionAttacksDictTypeAdapter
+from .types import (
+    InjectableRetryPromptPart,
+    InjectableToolReturnPart,
+    InjectionAttack,
+    InjectionAttacksDictTypeAdapter,
+)
 
 EntityT = TypeVar("EntityT")
 ResultT = TypeVar("ResultT")
@@ -296,6 +310,135 @@ def _state_run_context(
     return state.run_ctx
 
 
+MAX_TOOL_REPLAY_RESULT_PREVIEW_CHARS = 4000
+
+
+def _tool_call_id_from_return_part(part: Any) -> str | None:
+    if isinstance(
+        part,
+        ToolReturnPart | InjectableToolReturnPart,
+    ):
+        return part.tool_call_id
+    return None
+
+
+def _completed_tool_call_ids(messages: Sequence[ModelMessage]) -> set[str]:
+    completed: set[str] = set()
+    for message in messages:
+        if not isinstance(message, ModelRequest):
+            continue
+        for part in message.parts:
+            tool_call_id = _tool_call_id_from_return_part(part)
+            if tool_call_id is not None:
+                completed.add(tool_call_id)
+    return completed
+
+
+def _completed_tool_calls(messages: Sequence[ModelMessage]) -> list[tuple[int, ToolCallPart]]:
+    completed_ids = _completed_tool_call_ids(messages)
+    calls: list[tuple[int, ToolCallPart]] = []
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, ModelResponse):
+            continue
+        calls.extend(
+            (message_index, part)
+            for part in message.parts
+            if isinstance(part, ToolCallPart) and part.tool_call_id in completed_ids
+        )
+    return calls
+
+
+def _preview_tool_replay_result(result: Any) -> str:
+    text = str(result)
+    if len(text) <= MAX_TOOL_REPLAY_RESULT_PREVIEW_CHARS:
+        return text
+    return text[: MAX_TOOL_REPLAY_RESULT_PREVIEW_CHARS - 3] + "..."
+
+
+async def _replay_completed_tool_history(
+    *,
+    persistence: JobPersistence | None,
+    task_id: str,
+    run_id: str | None,
+    source_run_id: str,
+    execution: TaskRunExecution,
+    env_state: EnvStateT,
+    toolsets: Sequence[AbstractToolset[EnvStateT]],
+) -> None:
+    """Replay completed historical tools into a fresh environment before resume.
+
+    Conversation history is left unchanged; replay only restores tool side effects.
+    The final pending tool call, if any, has no matching tool-return and is not replayed.
+    """
+    if persistence is None or run_id is None:
+        return
+
+    entries: list[ToolReplayEntry] = []
+    replay_ctx: RunContext[EnvStateT] = RunContext(
+        deps=env_state,
+        model=TestModel(),
+        usage=RunUsage(),
+        messages=[],
+    )
+
+    for message_index, tool_call in _completed_tool_calls(execution.messages):
+        replayed_at = datetime.now()
+        try:
+            result = await run_tool_raw(replay_ctx, toolsets, tool_call)
+        except Exception as exc:
+            entries.append(
+                ToolReplayEntry(
+                    message_index=message_index,
+                    tool_call_id=tool_call.tool_call_id,
+                    tool_name=tool_call.tool_name,
+                    args=tool_call.args_as_dict(),
+                    replayed_at=replayed_at,
+                    outcome="error",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+            )
+            persistence.save_tool_replay(
+                TaskRunToolReplay(
+                    task_id=task_id,
+                    run_id=run_id,
+                    source_run_id=source_run_id,
+                    source_execution_id=execution.execution_id,
+                    replayed_at=datetime.now(),
+                    entries=entries,
+                )
+            )
+            raise
+
+        outcome = (
+            "retry"
+            if isinstance(result, RetryPromptPart | InjectableRetryPromptPart)
+            else "success"
+        )
+        entries.append(
+            ToolReplayEntry(
+                message_index=message_index,
+                tool_call_id=tool_call.tool_call_id,
+                tool_name=tool_call.tool_name,
+                args=tool_call.args_as_dict(),
+                replayed_at=replayed_at,
+                outcome=outcome,
+                result_preview=_preview_tool_replay_result(result),
+            )
+        )
+
+    persistence.save_tool_replay(
+        TaskRunToolReplay(
+            task_id=task_id,
+            run_id=run_id,
+            source_run_id=source_run_id,
+            source_execution_id=execution.execution_id,
+            replayed_at=datetime.now(),
+            entries=entries,
+        )
+    )
+
+
 def _resume_state_from_execution_state(
     state: ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],
 ) -> TaskRunResumeState:
@@ -480,6 +623,16 @@ async def _run_single_task_without_attack(
                         )
                         if not persistence.resume_partial_in_place:
                             run_id, _ = persistence.create_task_run_dir(task.id)
+                        if persistence.resume_replay_tool_history:
+                            await _replay_completed_tool_history(
+                                persistence=persistence,
+                                task_id=task.id,
+                                run_id=run_id,
+                                source_run_id=source_run_id,
+                                execution=execution,
+                                env_state=env_state,
+                                toolsets=toolsets,
+                            )
 
                     # Execute task, persisting the latest state after each transition.
                     end_state = None
@@ -778,6 +931,16 @@ async def _run_task_couple_with_attack(
                         )
                         if not persistence.resume_partial_in_place:
                             run_id, _ = persistence.create_task_run_dir(couple.id)
+                        if persistence.resume_replay_tool_history:
+                            await _replay_completed_tool_history(
+                                persistence=persistence,
+                                task_id=couple.id,
+                                run_id=run_id,
+                                source_run_id=source_run_id,
+                                execution=execution,
+                                env_state=env_state,
+                                toolsets=toolsets,
+                            )
 
                 async def persist_state(
                     state: ExecutionState[EnvStateT, RawOutputT, FinalOutputT, InjectionAttackT],

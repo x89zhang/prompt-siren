@@ -257,6 +257,12 @@ def start_attack(
     show_default=True,
     help="Number of times to resume each incomplete checkpoint.",
 )
+@click.option(
+    "--replay-tool-history/--no-replay-tool-history",
+    default=True,
+    show_default=True,
+    help="Before partial resume, replay completed historical tool calls to restore environment side effects.",
+)
 @click.argument("overrides", nargs=-1)
 def resume(
     job_path: Path,
@@ -265,6 +271,7 @@ def resume(
     copy_partial: bool,
     resume_only_partial: bool,
     partial_repeats: int,
+    replay_tool_history: bool,
     overrides: tuple[str, ...],
 ):
     """Resume an existing job from its job directory.
@@ -302,6 +309,7 @@ def resume(
             resume_partial_in_place=not copy_partial,
             resume_only_partial=resume_only_partial,
             resume_partial_repeats=partial_repeats,
+            resume_replay_tool_history=replay_tool_history,
         )
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
