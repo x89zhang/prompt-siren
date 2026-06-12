@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Literal
 
-from prompt_siren.job.models import CONFIG_FILENAME
+from prompt_siren.job.models import CONFIG_FILENAME, TASK_EXECUTION_METADATA_FILENAME
 from prompt_siren.job.naming import sanitize_for_filename
 from prompt_siren.trajectory_labeling import label_trajectory, LEVEL_RANK, LEVELS, UptakeLevel
 
@@ -55,6 +55,13 @@ def load_result_for_execution(execution_path: Path) -> dict[str, Any] | None:
     return load_json(result_path)
 
 
+def load_metadata_for_execution(execution_path: Path) -> dict[str, Any] | None:
+    metadata_path = execution_path.with_name(TASK_EXECUTION_METADATA_FILENAME)
+    if not metadata_path.exists():
+        return None
+    return load_json(metadata_path)
+
+
 def find_job_config_path(execution_path: Path) -> Path | None:
     for parent in execution_path.parents:
         config_path = parent / CONFIG_FILENAME
@@ -63,28 +70,74 @@ def find_job_config_path(execution_path: Path) -> Path | None:
     return None
 
 
-def ensure_trajectory_labels(execution: dict[str, Any]) -> dict[str, Any]:
+def execution_attacks(
+    execution: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> Any:
+    if isinstance(metadata, dict) and metadata.get("attacks") is not None:
+        return metadata.get("attacks")
+    return execution.get("attacks")
+
+
+def ensure_trajectory_labels(
+    execution: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if isinstance(metadata, dict):
+        labels = metadata.get("trajectory_labels")
+        if isinstance(labels, dict):
+            return labels
+
     labels = execution.get("trajectory_labels")
     if isinstance(labels, dict):
         return labels
 
     computed = label_trajectory(
         execution.get("messages", []),
-        attacks=execution.get("attacks"),
+        attacks=execution_attacks(execution, metadata),
         attack_score=None,
     )
     return computed.to_json()
 
 
-def target_index(labels: dict[str, Any], level: UptakeLevel, cut_source: CutSource) -> int | None:
+def occurrence_index(
+    labels: dict[str, Any],
+    level: UptakeLevel,
+    occurrence: int,
+) -> int | None:
+    seen = 0
+    for label in labels.get("messages", []):
+        if not isinstance(label, dict) or label.get("message_level") != level:
+            continue
+        index = label.get("message_index")
+        if not isinstance(index, int):
+            continue
+        seen += 1
+        if seen == occurrence:
+            return index
+    return None
+
+
+def target_index(
+    labels: dict[str, Any],
+    level: UptakeLevel,
+    cut_source: CutSource,
+    occurrence: int = 1,
+) -> int | None:
+    if cut_source == "first_occurrence" and occurrence > 1:
+        return occurrence_index(labels, level, occurrence)
+
     source = labels.get(cut_source)
-    if not isinstance(source, dict):
-        return None
-    point = source.get(level)
-    if not isinstance(point, dict):
-        return None
-    index = point.get("message_index")
-    return index if isinstance(index, int) else None
+    if isinstance(source, dict):
+        point = source.get(level)
+        if isinstance(point, dict):
+            index = point.get("message_index")
+            if isinstance(index, int):
+                return index
+
+    if cut_source == "first_occurrence":
+        return occurrence_index(labels, level, 1)
+    return None
 
 
 def attack_payload_texts(attacks: Any, match: PayloadMatch) -> list[str]:
@@ -193,21 +246,14 @@ def truncate_labels(labels: dict[str, Any], keep_count: int) -> dict[str, Any]:
 
 def truncate_execution(
     execution: dict[str, Any],
-    labels: dict[str, Any],
     *,
     keep_count: int,
-    source_execution_path: Path,
-    truncation: dict[str, Any],
 ) -> dict[str, Any]:
     truncated = copy.deepcopy(execution)
     truncated["messages"] = truncated.get("messages", [])[:keep_count]
-    truncated["trajectory_labels"] = truncate_labels(labels, keep_count)
-    truncated["truncation"] = truncation | {
-        "source_execution_path": str(source_execution_path),
-        "kept_message_count": keep_count,
-        "original_message_count": len(execution.get("messages", [])),
-    }
     truncated["resume_state"] = None
+    for metadata_key in ("attacks", "trajectory_labels", "truncation"):
+        truncated.pop(metadata_key, None)
     return truncated
 
 
@@ -215,6 +261,7 @@ def truncate_result(
     result: dict[str, Any] | None,
     *,
     execution: dict[str, Any],
+    trajectory_level: UptakeLevel,
     keep_count: int,
     source_execution_path: Path,
     truncation: dict[str, Any],
@@ -222,9 +269,7 @@ def truncate_result(
     truncated = copy.deepcopy(result) if result is not None else {}
     truncated["task_id"] = truncated.get("task_id") or execution.get("task_id")
     truncated["run_id"] = truncated.get("run_id") or execution.get("run_id")
-    labels = execution.get("trajectory_labels", {})
-    if isinstance(labels, dict):
-        truncated["trajectory_level"] = labels.get("trajectory_level")
+    truncated["trajectory_level"] = trajectory_level
     truncated["attack_score"] = None
     truncated["benign_score"] = None
     truncated["exception_info"] = None
@@ -325,6 +370,7 @@ def truncate_one(
     *,
     levels: list[UptakeLevel],
     cut_source: CutSource,
+    occurrence: int,
     include_trigger: bool,
     payload_offsets: list[int],
     payload_match: PayloadMatch,
@@ -333,13 +379,15 @@ def truncate_one(
     root: Path,
 ) -> list[dict[str, Any]]:
     execution = load_json(execution_path)
+    metadata = load_metadata_for_execution(execution_path)
     result = load_result_for_execution(execution_path)
-    labels = ensure_trajectory_labels(execution)
+    labels = ensure_trajectory_labels(execution, metadata)
+    attacks = execution_attacks(execution, metadata)
     messages = execution.get("messages", [])
     records = []
 
     for level in levels:
-        index = target_index(labels, level, cut_source)
+        index = target_index(labels, level, cut_source, occurrence)
         if index is None:
             records.append(
                 {
@@ -347,7 +395,8 @@ def truncate_one(
                     "method": "label",
                     "target_level": level,
                     "cut_source": cut_source,
-                    "status": "missing_level",
+                    "occurrence": occurrence,
+                    "status": "missing_level_occurrence" if occurrence > 1 else "missing_level",
                 }
             )
             continue
@@ -362,19 +411,21 @@ def truncate_one(
             "method": "label",
             "target_level": level,
             "cut_source": cut_source,
-            "include_trigger_message": keep_count > target_index(labels, level, cut_source),
+            "include_trigger_message": include_trigger,
+            "occurrence": occurrence,
         }
         suffix = f"{cut_source}_{level}"
+        if occurrence > 1:
+            suffix = f"{suffix}_occurrence_{occurrence}"
+        truncated_labels = truncate_labels(labels, keep_count)
         truncated_execution = truncate_execution(
             execution,
-            labels,
             keep_count=keep_count,
-            source_execution_path=execution_path,
-            truncation=truncation,
         )
         truncated_result = truncate_result(
             result,
             execution=truncated_execution,
+            trajectory_level=truncated_labels["trajectory_level"],
             keep_count=keep_count,
             source_execution_path=execution_path,
             truncation=truncation,
@@ -385,12 +436,11 @@ def truncate_one(
             "method": "label",
             "target_level": level,
             "cut_source": cut_source,
+            "occurrence": occurrence,
             "trigger_message_index": index,
             "kept_message_count": keep_count,
             "original_message_count": len(messages),
-            "truncated_trajectory_level": truncated_execution["trajectory_labels"][
-                "trajectory_level"
-            ],
+            "truncated_trajectory_level": truncated_labels["trajectory_level"],
             "status": "planned",
         }
         records.append(
@@ -408,7 +458,7 @@ def truncate_one(
 
     exposure_index = first_payload_exposure_index(
         messages,
-        execution.get("attacks"),
+        attacks,
         match=payload_match,
     )
     for offset in payload_offsets:
@@ -449,16 +499,15 @@ def truncate_one(
             "target_message_index": target_message_index,
         }
         suffix = f"payload_exposure_after_{offset}"
+        truncated_labels = truncate_labels(labels, keep_count)
         truncated_execution = truncate_execution(
             execution,
-            labels,
             keep_count=keep_count,
-            source_execution_path=execution_path,
-            truncation=truncation,
         )
         truncated_result = truncate_result(
             result,
             execution=truncated_execution,
+            trajectory_level=truncated_labels["trajectory_level"],
             keep_count=keep_count,
             source_execution_path=execution_path,
             truncation=truncation,
@@ -473,9 +522,7 @@ def truncate_one(
             "target_message_index": target_message_index,
             "kept_message_count": keep_count,
             "original_message_count": len(messages),
-            "truncated_trajectory_level": truncated_execution["trajectory_labels"][
-                "trajectory_level"
-            ],
+            "truncated_trajectory_level": truncated_labels["trajectory_level"],
             "status": "planned",
         }
         records.append(
@@ -499,6 +546,16 @@ def parse_level(value: str) -> UptakeLevel:
     if normalized not in LEVEL_RANK or normalized == "L0":
         raise argparse.ArgumentTypeError("level must be one of L1, L2, L3, L4, L5")
     return normalized  # type: ignore[return-value]
+
+
+def parse_occurrence(value: str) -> int:
+    try:
+        occurrence = int(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("occurrence must be an integer") from e
+    if occurrence < 1:
+        raise argparse.ArgumentTypeError("occurrence must be at least 1")
+    return occurrence
 
 
 def parse_payload_offset(value: str) -> int:
@@ -538,6 +595,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--before-trigger",
         action="store_true",
         help="Drop the trigger message instead of truncating immediately after it.",
+    )
+    parser.add_argument(
+        "--occurrence",
+        type=parse_occurrence,
+        default=1,
+        help=(
+            "Which exact level occurrence to truncate at when --cut-source is "
+            "first_occurrence. Defaults to 1."
+        ),
     )
     parser.add_argument(
         "--skip-labels",
@@ -581,6 +647,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.occurrence != 1 and args.cut_source != "first_occurrence":
+        raise SystemExit("--occurrence can only be used with --cut-source first_occurrence")
     execution_paths = find_execution_paths(args.paths)
     root = common_root(execution_paths)
     levels = [] if args.skip_labels else args.levels
@@ -591,6 +659,7 @@ def main(argv: list[str] | None = None) -> int:
                 execution_path,
                 levels=levels,
                 cut_source=args.cut_source,
+                occurrence=args.occurrence,
                 include_trigger=not args.before_trigger,
                 payload_offsets=args.payload_offsets,
                 payload_match=args.payload_match,
