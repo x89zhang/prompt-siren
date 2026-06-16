@@ -16,8 +16,8 @@ class SwebenchDatasetConfig(BaseModel):
     """HuggingFace dataset name or path to local JSON/JSONL file."""
 
     # Build options
-    use_cache: bool = True
-    """Whether to use Docker build cache."""
+    use_cache: bool = False
+    """Whether to reuse existing local Docker images/build contexts."""
 
     build_timeout: int = 1800
     """Docker build timeout in seconds (default: 30 minutes)."""

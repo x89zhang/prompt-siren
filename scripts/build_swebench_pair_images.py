@@ -41,7 +41,11 @@ def _matches_pair(spec, instance_id: str, attack_id: str) -> bool:
 
 async def _build(args: argparse.Namespace) -> None:
     config_class = get_dataset_config_class("swebench")
-    config = config_class(dataset_name=args.dataset_name)
+    config = config_class(
+        dataset_name=args.dataset_name,
+        enable_source_injection=args.enable_source_injection,
+        enable_skill_injection=args.enable_skill_injection,
+    )
 
     specs = get_image_build_specs("swebench", config, args.cache_dir)
     selected_specs = [
@@ -103,6 +107,32 @@ def main() -> None:
         "--cache-dir",
         default=".siren-docker-cache/swebench",
         help="Build context cache directory.",
+    )
+    parser.add_argument(
+        "--enable-source-injection",
+        dest="enable_source_injection",
+        action="store_true",
+        default=False,
+        help="Insert the injection into the mapped source-code location.",
+    )
+    parser.add_argument(
+        "--disable-source-injection",
+        dest="enable_source_injection",
+        action="store_false",
+        help="Do not insert the injection into the mapped source-code location.",
+    )
+    parser.add_argument(
+        "--enable-skill-injection",
+        dest="enable_skill_injection",
+        action="store_true",
+        default=True,
+        help="Create repository SKILL.md files containing the injection.",
+    )
+    parser.add_argument(
+        "--disable-skill-injection",
+        dest="enable_skill_injection",
+        action="store_false",
+        help="Do not create repository SKILL.md files containing the injection.",
     )
     parser.add_argument(
         "--rebuild-existing",
