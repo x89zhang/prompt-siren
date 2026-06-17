@@ -1,7 +1,7 @@
 type: swebench # Dataset type identifier matching entry point
 config:
   dataset_name: SWE-bench/SWE-bench_Lite # HuggingFace dataset
-  use_cache: false # Rebuild selected local images by default
+  use_cache: true # Reuse existing local images by default
   build_timeout: 1800 # 30 minutes
   bash_timeout: 60 # Default timeout for agent bash tool commands
   registry: ghcr.io/ethz-spylab/prompt-siren-images # Default registry (set to null to disable)
