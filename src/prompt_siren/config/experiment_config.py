@@ -58,7 +58,8 @@ class TrajectoryLabelingConfig(BaseModel):
         default="hybrid",
         description=(
             "Automatic trajectory labeling method. 'hybrid' uses rules plus old-path "
-            "L2/L3 semantic judges; 'judge_audit' uses the full L0-L5 judge-audit loop."
+            "L2/L3 semantic judges; 'judge_audit' first uses an LLM relevance filter, "
+            "then applies hybrid labeling to attack-related messages."
         ),
     )
 
@@ -103,19 +104,22 @@ class TrajectoryLabelingConfig(BaseModel):
     judge_audit_max_attempts: int = Field(
         default=3,
         ge=1,
-        description="Maximum LLM retries per message for the full L0-L5 judge-audit method.",
+        description="Maximum LLM retries per message for attack-relevance classification.",
     )
     judge_audit_prior_window: int | None = Field(
         default=6,
         ge=0,
         description=(
-            "Number of immediately preceding messages for full judge-audit, in addition "
+            "Number of immediately preceding messages for the relevance judge, in addition "
             "to the initial system/task context. Null means all prior messages."
         ),
     )
     judge_audit_agent_messages_only: bool = Field(
-        default=True,
-        description="Only call the full judge-audit LLM for agent response messages.",
+        default=False,
+        description=(
+            "Only use the LLM relevance judge for agent response messages; non-agent "
+            "messages use deterministic relevance filtering."
+        ),
     )
 
     @property

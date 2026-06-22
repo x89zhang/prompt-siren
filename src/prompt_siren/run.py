@@ -216,6 +216,11 @@ async def _label_trajectory_for_result(
 
         if labeling_config.method == "judge_audit":
             judge_model, judge_model_settings = _labeling_model_for_agent(agent)
+            old_path_audit_rubric = None
+            if labeling_config.old_path_audit_enabled:
+                old_path_audit_rubric = labeling_config.old_path_audit_rubric.read_text(
+                    encoding="utf-8"
+                )
             labels = await label_trajectory_with_judge_audit(
                 messages,
                 attacks=generated_attacks,
@@ -227,6 +232,11 @@ async def _label_trajectory_for_result(
                     prior_context_window=labeling_config.judge_audit_prior_window,
                     judge_agent_messages_only=labeling_config.judge_audit_agent_messages_only,
                 ),
+                l2_reaction_threshold=labeling_config.l2_reaction_threshold,
+                l3_threshold=labeling_config.l3_threshold,
+                old_path_audit_rubric=old_path_audit_rubric,
+                old_path_audit_max_attempts=labeling_config.old_path_audit_max_attempts,
+                task_id=task_id,
             )
         else:
             old_path_judge_enabled = (
@@ -777,9 +787,7 @@ async def run_single_tasks_without_attack(
     )
     incomplete_run_ids: dict[str, list[str]] = {}
     if persistence is not None:
-        incomplete_run_ids = {
-            task.id: persistence.list_resume_run_ids(task.id) for task in tasks
-        }
+        incomplete_run_ids = {task.id: persistence.list_resume_run_ids(task.id) for task in tasks}
 
     async def run_single(task: Task[EnvStateT]) -> SingleTaskExecutionResult[EnvStateT]:
         """Run task and return result or error without propagating."""

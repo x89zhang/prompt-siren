@@ -52,9 +52,9 @@ trajectory_labeling:
   old_path_audit_enabled: false # Hybrid: run final LLM audit over labels using a markdown rubric
   old_path_audit_rubric: docs/labeling/old_path_6level_rubric.md
   old_path_audit_max_attempts: 2
-  judge_audit_max_attempts: 3 # Judge-audit: retries per message
-  judge_audit_prior_window: 6 # Judge-audit: recent context window; null means all prior messages
-  judge_audit_agent_messages_only: true # Judge-audit: only call LLM for agent response messages
+  judge_audit_max_attempts: 3 # Relevance judge: retries per message
+  judge_audit_prior_window: 6 # Relevance judge: recent context window; null means all prior messages
+  judge_audit_agent_messages_only: false # false means LLM relevance filtering for every message
 
 # =============================================================================
 # TASK SELECTION
