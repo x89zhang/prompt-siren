@@ -72,6 +72,7 @@ swebench = "prompt_siren.datasets.swebench_dataset:swebench_entry"
 
 [project.entry-points."prompt_siren.sandbox_managers"]
 local-docker = "prompt_siren.sandbox_managers.docker:create_docker_sandbox_manager"
+apptainer = "prompt_siren.sandbox_managers.apptainer:create_apptainer_sandbox_manager"
 
 [project.entry-points."prompt_siren.providers"]
 bedrock = "prompt_siren.providers.bedrock:BedrockProvider"

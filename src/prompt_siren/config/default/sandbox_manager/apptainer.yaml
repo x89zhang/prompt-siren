@@ -1,0 +1,13 @@
+type: apptainer
+config:
+  apptainer_executable: apptainer
+  image_dir: sif-images
+  work_dir: .siren-apptainer
+  overlay_size_mb: 4096
+  bind_paths: []
+  contain: true
+  cleanenv: true
+  fakeroot: false
+  nv: false
+  network_enabled: false
+  service_start_timeout: 30

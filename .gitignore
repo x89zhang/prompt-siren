@@ -38,3 +38,8 @@ papers/
 past_jobs/
 runs/
 open_coding/
+*.tar
+*.slurm
+*.log
+*.out
+*.sh
