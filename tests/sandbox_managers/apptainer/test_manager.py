@@ -12,6 +12,10 @@ from prompt_siren.sandbox_managers.apptainer import (
     create_apptainer_sandbox_manager,
     image_tag_to_sif_name,
 )
+from prompt_siren.sandbox_managers.apptainer.manager import (
+    ApptainerBatchState,
+    ApptainerContainer,
+)
 from prompt_siren.sandbox_managers.image_spec import PullImageSpec
 from prompt_siren.sandbox_managers.sandbox_task_setup import (
     ContainerSetup,
@@ -162,3 +166,37 @@ async def test_exec_outside_batch_raises_error() -> None:
     manager = ApptainerSandboxManager(ApptainerSandboxConfig())
     with pytest.raises(RuntimeError, match="exec called outside of setup_batch context"):
         await manager.exec("container", "echo test")
+
+
+@pytest.mark.parametrize(
+    ("minimum_exec_timeout", "requested_timeout", "expected_timeout"),
+    [(0, 5, 5), (30, 5, 30), (30, 60, 60), (30, None, 300)],
+)
+async def test_exec_applies_configured_minimum_timeout(
+    tmp_path: Path,
+    minimum_exec_timeout: int,
+    requested_timeout: int | None,
+    expected_timeout: int,
+) -> None:
+    manager = ApptainerSandboxManager(
+        ApptainerSandboxConfig(minimum_exec_timeout=minimum_exec_timeout)
+    )
+    container = ApptainerContainer(
+        container_id="container",
+        instance_name="instance",
+        image_path=tmp_path / "image.sif",
+        overlay_path=tmp_path / "overlay.img",
+    )
+    manager._batch_state = ApptainerBatchState(
+        batch_id="batch",
+        containers={container.container_id: container},
+    )
+
+    with patch.object(
+        manager,
+        "_run",
+        new=AsyncMock(return_value=ExecOutput(outputs=[], exit_code=0)),
+    ) as run_mock:
+        await manager.exec(container.container_id, ["true"], timeout=requested_timeout)
+
+    assert run_mock.await_args.kwargs["timeout"] == expected_timeout

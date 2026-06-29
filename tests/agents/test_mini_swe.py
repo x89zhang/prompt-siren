@@ -99,3 +99,52 @@ def test_skill_paths_are_added_to_initial_history(tmp_path) -> None:
     assert isinstance(skill_part, SystemPromptPart)
     assert "read the relevant SKILL.md before taking action" in skill_part.content
     assert "SKILL.md" in skill_part.content
+
+
+def test_format_error_response_capture_is_disabled_by_default() -> None:
+    messages = _agent()._mini_interrupt_messages_to_model_messages(
+        [
+            {
+                "role": "user",
+                "content": "Format error",
+                "extra": {
+                    "interrupt_type": "FormatError",
+                    "n_actions": 0,
+                    "model_response": "raw malformed response",
+                },
+            }
+        ]
+    )
+
+    assert messages[0].metadata is None
+
+
+def test_format_error_response_capture_uses_request_metadata() -> None:
+    agent = MiniSweAgent(
+        _config=MiniSweAgentConfig(
+            mini_swe_agent_path=None,
+            config_specs=[],
+            capture_format_error_responses=True,
+        )
+    )
+    messages = agent._mini_interrupt_messages_to_model_messages(
+        [
+            {
+                "role": "user",
+                "content": "Format error",
+                "extra": {
+                    "interrupt_type": "FormatError",
+                    "n_actions": 0,
+                    "model_response": "raw malformed response",
+                },
+            }
+        ]
+    )
+
+    assert messages[0].parts[0].content == "Format error"
+    assert messages[0].metadata == {
+        "mini_swe_format_error": {
+            "n_actions": 0,
+            "model_response": "raw malformed response",
+        }
+    }

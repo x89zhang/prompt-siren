@@ -105,6 +105,8 @@ async def _ensure_local_swebench_images(
         return
     if experiment_config.sandbox_manager is None:
         return
+    if experiment_config.sandbox_manager.type != "local-docker":
+        return
 
     required_tags = _get_required_swebench_image_tags(selected_couples)
     if not required_tags:

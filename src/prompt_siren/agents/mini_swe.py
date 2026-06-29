@@ -114,6 +114,13 @@ class MiniSweAgentConfig(BaseModel):
             "Docker network cloning issues and is sufficient for non-rollback attacks."
         ),
     )
+    capture_format_error_responses: bool = Field(
+        default=False,
+        description=(
+            "Store the raw model response for mini-swe format errors in execution message "
+            "metadata. This is diagnostic only and does not add the response to the model prompt."
+        ),
+    )
     skill_paths: tuple[Path, ...] = Field(
         default_factory=tuple,
         description=(
@@ -734,8 +741,8 @@ class MiniSweAgent(AbstractAgent):
         )
         return ModelRequestState(updated_ctx, environment, next_request, previous_state)
 
-    @staticmethod
     def _mini_interrupt_messages_to_model_messages(
+        self,
         messages: Sequence[dict[str, Any]],
     ) -> list[ModelMessage]:
         result: list[ModelMessage] = []
@@ -747,7 +754,20 @@ class MiniSweAgent(AbstractAgent):
             elif role == "system":
                 result.append(ModelRequest(parts=[SystemPromptPart(content)]))
             else:
-                result.append(ModelRequest(parts=[UserPromptPart(content)]))
+                metadata = None
+                extra = message.get("extra")
+                if (
+                    self.config.capture_format_error_responses
+                    and isinstance(extra, dict)
+                    and extra.get("interrupt_type") == "FormatError"
+                ):
+                    metadata = {
+                        "mini_swe_format_error": {
+                            "n_actions": extra.get("n_actions"),
+                            "model_response": extra.get("model_response"),
+                        }
+                    }
+                result.append(ModelRequest(parts=[UserPromptPart(content)], metadata=metadata))
         return result
 
     @staticmethod

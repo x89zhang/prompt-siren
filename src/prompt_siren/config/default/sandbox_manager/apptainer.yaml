@@ -11,3 +11,4 @@ config:
   nv: false
   network_enabled: false
   service_start_timeout: 30
+  minimum_exec_timeout: 0

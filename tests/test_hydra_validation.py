@@ -94,6 +94,29 @@ class TestExpandEntitiesForRequiredRuns:
 
 class TestEnsureLocalSwebenchImages:
     @pytest.mark.anyio
+    async def test_non_docker_sandbox_skips_local_docker_image_check(self):
+        config = ExperimentConfig.model_validate(
+            {
+                "name": "test",
+                "agent": {"type": "plain", "config": {"model": "test"}},
+                "dataset": {
+                    "type": "swebench",
+                    "config": {"registry": None, "use_cache": False},
+                },
+                "attack": {"type": "template_string", "config": {}},
+                "sandbox_manager": {
+                    "type": "apptainer",
+                    "config": {"image_dir": "/tmp/images"},
+                },
+            }
+        )
+
+        with patch("prompt_siren.hydra_app.create_docker_client_from_config") as docker_client:
+            await _ensure_local_swebench_images(config, [_Entity("task")])
+
+        docker_client.assert_not_called()
+
+    @pytest.mark.anyio
     async def test_use_cache_false_rebuilds_required_images_even_if_present(self):
         config = ExperimentConfig.model_validate(
             {

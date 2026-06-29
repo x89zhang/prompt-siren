@@ -56,6 +56,14 @@ class ApptainerSandboxConfig(BaseModel):
     batch_id_prefix: str = "workbench-apptainer"
     image_overrides: dict[str, Path] = Field(default_factory=dict)
     service_start_timeout: int = Field(default=30, gt=0)
+    minimum_exec_timeout: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum timeout in seconds for Apptainer exec calls. A value of 0 "
+            "preserves caller-provided timeouts without a floor."
+        ),
+    )
 
 
 @dataclass
@@ -208,7 +216,10 @@ class ApptainerSandboxManager:
         if container is None:
             raise ValueError(f"Unknown Apptainer container id: {container_id}")
 
-        timeout_value = timeout if timeout is not None else 300
+        timeout_value = max(
+            timeout if timeout is not None else 300,
+            self._config.minimum_exec_timeout,
+        )
         shell = str(shell_path) if shell_path is not None else "/bin/bash"
         bash_cmd = self._normalize_shell_command(cmd)
         if cwd:
