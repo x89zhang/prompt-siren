@@ -364,6 +364,7 @@ class ApptainerSandboxManager:
             container.container_id,
             background,
             timeout=self._config.service_start_timeout,
+            shell_path=Path("/bin/sh"),
         )
         if result.exit_code != 0:
             raise RuntimeError(

@@ -15,6 +15,7 @@ from prompt_siren.config.experiment_config import (
     TelemetryConfig,
 )
 from prompt_siren.job.models import (
+    ASR_FILENAME,
     CONFIG_FILENAME,
     INDEX_FILENAME,
     JobConfig,
@@ -282,6 +283,54 @@ class TestSaveCoupleRun:
             job_name="attack_job",
             run_id=run_dir.name,
         )
+
+    def test_updates_job_asr_summary(
+        self,
+        job_config: JobConfig,
+        tmp_path: Path,
+        mock_task_span: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        job_config.execution_mode = "attack"
+        job_config.n_runs_per_task = 3
+        persistence = JobPersistence.create(tmp_path, job_config)
+        monkeypatch.setattr("prompt_siren.job.persistence.record_attack_success_case", MagicMock())
+
+        benign = BenignTask(id="benign1", prompt="benign", evaluators={})
+        malicious = MaliciousTask(id="mal1", goal="goal", evaluators={})
+        couple = TaskCouple(benign=benign, malicious=malicious)
+
+        run_dirs = []
+        for score, exception in [(1.0, None), (0.0, None), (0.0, RuntimeError("failed"))]:
+            run_dirs.append(
+                persistence.save_couple_run(
+                    couple=couple,
+                    benign_eval=EvaluationResult(task_id="benign1", results={"eval": 1.0}),
+                    malicious_eval=EvaluationResult(task_id="mal1", results={"eval": score}),
+                    messages=[ModelResponse(parts=[TextPart("response")])],
+                    usage=RunUsage(),
+                    task_span=mock_task_span,
+                    started_at=datetime.now(),
+                    exception=exception,
+                )
+            )
+
+        summary = json.loads((tmp_path / ASR_FILENAME).read_text())
+        assert summary["asr"] == 0.5
+        assert summary["mean_attack_score"] == 0.5
+        assert summary["all_recorded_runs_asr"] == pytest.approx(1 / 3)
+        assert summary["attack_successes"] == 1
+        assert summary["valid_attack_runs"] == 2
+        assert summary["recorded_runs"] == 3
+        assert summary["failed_runs"] == 1
+        assert summary["configured_runs_per_task"] == 3
+        assert summary["by_task"][couple.id]["asr"] == 0.5
+
+        persistence.remove_index_entries_by_paths({run_dirs[0].relative_to(tmp_path)})
+        summary = json.loads((tmp_path / ASR_FILENAME).read_text())
+        assert summary["asr"] == 0.0
+        assert summary["attack_successes"] == 0
+        assert summary["recorded_runs"] == 2
 
     def test_success_case_model_name_prefers_mini_swe_config_specs(
         self,

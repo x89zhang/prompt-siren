@@ -94,6 +94,11 @@ async def test_setup_task_starts_agent_and_service_instances(tmp_path: Path) -> 
         for cmd in run_commands
         if len(cmd) > 1 and cmd[1] == "exec"
     )
+    assert any(
+        cmd[-3] == "/bin/sh"
+        for cmd in run_commands
+        if len(cmd) > 1 and cmd[1] == "exec"
+    )
     assert any(cmd[:3] == ["apptainer", "instance", "stop"] for cmd in run_commands)
 
 
