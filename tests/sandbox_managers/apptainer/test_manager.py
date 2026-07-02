@@ -87,8 +87,17 @@ async def test_setup_task_starts_agent_and_service_instances(tmp_path: Path) -> 
                         assert state.service_containers["service"].endswith(":service")
                         assert state.network_id is None
 
+                        agent = manager._batch_state.containers[state.agent_container_id]
+                        assert agent.hosts_path is not None
+                        assert "127.0.0.1\tsvc.local" in agent.hosts_path.read_text()
+
     run_commands = [call.args[0] for call in run_mock.call_args_list]
     assert any(cmd[:3] == ["apptainer", "instance", "start"] for cmd in run_commands)
+    assert any(
+        any(part.endswith(":/etc/hosts:ro") for part in cmd)
+        for cmd in run_commands
+        if cmd[:3] == ["apptainer", "instance", "start"]
+    )
     assert any(
         "nohup python3 /server.py" in " ".join(cmd)
         for cmd in run_commands
@@ -124,6 +133,7 @@ async def test_clone_sandbox_state_copies_agent_and_service_overlays(tmp_path: P
         name="service",
         spec=ContainerSpec(
             image_spec=PullImageSpec(tag="service:latest"),
+            hostname="svc.local",
             command=["python3", "/server.py"],
         ),
     )
@@ -149,6 +159,15 @@ async def test_clone_sandbox_state_copies_agent_and_service_overlays(tmp_path: P
                         assert clone.execution_id != state.execution_id
                         assert clone.agent_container_id.endswith(":agent")
                         assert clone.service_containers["service"].endswith(":service")
+                        source_agent = manager._batch_state.containers[state.agent_container_id]
+                        cloned_agent = manager._batch_state.containers[clone.agent_container_id]
+                        assert source_agent.hosts_path is not None
+                        assert cloned_agent.hosts_path is not None
+                        assert cloned_agent.hosts_path != source_agent.hosts_path
+                        assert (
+                            cloned_agent.hosts_path.read_text()
+                            == source_agent.hosts_path.read_text()
+                        )
                         await manager._cleanup_container(clone.agent_container_id)
                         await manager._cleanup_container(clone.service_containers["service"])
 

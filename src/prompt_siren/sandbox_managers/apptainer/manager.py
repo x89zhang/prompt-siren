@@ -75,6 +75,7 @@ class ApptainerContainer:
     environment: dict[str, str] = field(default_factory=dict)
     hostname: str | None = None
     startup_command: str | list[str] | None = None
+    hosts_path: Path | None = None
 
 
 @dataclass
@@ -128,10 +129,16 @@ class ApptainerSandboxManager:
         started_ids: list[ContainerID] = []
 
         try:
+            service_hostnames = tuple(
+                service_setup.spec.hostname
+                for service_setup in task_setup.service_containers.values()
+                if service_setup.spec.hostname
+            )
             agent_container = await self._start_container(
                 task_setup.agent_container,
                 execution_id=execution_id,
                 role_name="agent",
+                host_aliases=service_hostnames,
             )
             started_ids.append(agent_container.container_id)
 
@@ -248,6 +255,7 @@ class ApptainerSandboxManager:
         execution_id: str,
         role_name: str,
         overlay_source: Path | None = None,
+        host_aliases: Sequence[str] = (),
     ) -> ApptainerContainer:
         if self._batch_state is None:
             raise RuntimeError("setup_task called outside of setup_batch context")
@@ -262,6 +270,7 @@ class ApptainerSandboxManager:
         else:
             shutil.copy2(overlay_source, overlay_path)
 
+        hosts_path = self._create_hosts_file(execution_id, role_name, host_aliases)
         container = ApptainerContainer(
             container_id=container_id,
             instance_name=instance_name,
@@ -270,6 +279,7 @@ class ApptainerSandboxManager:
             environment=container_setup.spec.environment or {},
             hostname=container_setup.spec.hostname,
             startup_command=container_setup.spec.command,
+            hosts_path=hosts_path,
         )
 
         cmd = [
@@ -325,6 +335,10 @@ class ApptainerSandboxManager:
         instance_name = self._instance_name(execution_id, role_name)
         overlay_path = self._config.work_dir / f"{self._batch_state.batch_id}-{execution_id}-{role_name}.img"
         shutil.copy2(source.overlay_path, overlay_path)
+        hosts_path = None
+        if source.hosts_path is not None:
+            hosts_path = self._hosts_path(execution_id, role_name)
+            shutil.copy2(source.hosts_path, hosts_path)
 
         container = ApptainerContainer(
             container_id=container_id,
@@ -334,6 +348,7 @@ class ApptainerSandboxManager:
             environment=dict(source.environment),
             hostname=source.hostname,
             startup_command=source.startup_command,
+            hosts_path=hosts_path,
         )
         cmd = [
             self._config.apptainer_executable,
@@ -375,11 +390,41 @@ class ApptainerSandboxManager:
     def _instance_start_flags(self, container: ApptainerContainer) -> list[str]:
         flags: list[str] = ["--overlay", str(container.overlay_path)]
         flags.extend(self._common_flags(include_hostname=container.hostname is not None))
+        if container.hosts_path is not None:
+            flags.extend(["--bind", f"{container.hosts_path}:/etc/hosts:ro"])
         if container.hostname:
             flags.extend(["--hostname", container.hostname])
         for key, value in container.environment.items():
             flags.extend(["--env", f"{key}={value}"])
         return flags
+
+    def _hosts_path(self, execution_id: str, role_name: str) -> Path:
+        if self._batch_state is None:
+            raise RuntimeError("hosts file requested outside of setup_batch context")
+        return self._config.work_dir / (
+            f"{self._batch_state.batch_id}-{execution_id}-{role_name}.hosts"
+        )
+
+    def _create_hosts_file(
+        self,
+        execution_id: str,
+        role_name: str,
+        host_aliases: Sequence[str],
+    ) -> Path | None:
+        aliases = tuple(dict.fromkeys(host_aliases))
+        if not aliases:
+            return None
+        for hostname in aliases:
+            if not hostname or any(character.isspace() for character in hostname):
+                raise ValueError(f"Invalid service hostname: {hostname!r}")
+
+        hosts_path = self._hosts_path(execution_id, role_name)
+        content = Path("/etc/hosts").read_text()
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += "".join(f"127.0.0.1\t{hostname}\n" for hostname in aliases)
+        hosts_path.write_text(content)
+        return hosts_path
 
     def _exec_flags(self, extra_env: dict[str, str] | None) -> list[str]:
         flags = self._common_flags(include_hostname=False)
@@ -505,6 +550,11 @@ class ApptainerSandboxManager:
             container.overlay_path.unlink(missing_ok=True)
         except OSError:
             pass
+        if container.hosts_path is not None:
+            try:
+                container.hosts_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     async def _cleanup_batch(self) -> None:
         if self._batch_state is None:
