@@ -176,24 +176,9 @@ class ApptainerSandboxManager:
             execution_id=new_execution_id,
             role_name="agent",
         )
-        new_services: dict[str, ContainerID] = {}
-        try:
-            for service_name, service_id in source_state.service_containers.items():
-                cloned_service = await self._clone_container(
-                    service_id,
-                    execution_id=new_execution_id,
-                    role_name=service_name,
-                )
-                new_services[service_name] = cloned_service.container_id
-                if cloned_service.startup_command:
-                    await self._start_background_command(cloned_service)
-        except Exception:
-            await self._cleanup_container(new_agent.container_id)
-            await asyncio.gather(
-                *(self._cleanup_container(container_id) for container_id in new_services.values()),
-                return_exceptions=True,
-            )
-            raise
+        # Service instances use the host network on Apptainer. Reuse them across
+        # agent snapshots so low/high ports and evaluator logs remain stable.
+        new_services = dict(source_state.service_containers)
 
         return SandboxState(
             agent_container_id=new_agent.container_id,
@@ -374,7 +359,12 @@ class ApptainerSandboxManager:
         if container.startup_command is None:
             return
         command = self._normalize_shell_command(container.startup_command)
-        background = f"nohup {command} >/tmp/prompt-siren-service.log 2>&1 &"
+        background = (
+            f"nohup {command} >/tmp/prompt-siren-service.log 2>&1 & service_pid=$!; "
+            "sleep 1; "
+            'if ! kill -0 "$service_pid" 2>/dev/null; then '
+            "cat /tmp/prompt-siren-service.log >&2; exit 1; fi"
+        )
         result = await self.exec(
             container.container_id,
             background,

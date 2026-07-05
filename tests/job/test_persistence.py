@@ -325,12 +325,48 @@ class TestSaveCoupleRun:
         assert summary["failed_runs"] == 1
         assert summary["configured_runs_per_task"] == 3
         assert summary["by_task"][couple.id]["asr"] == 0.5
+        levels = summary["trajectory_levels"]
+        assert levels["rates_denominator"] == "recorded_runs"
+        assert levels["labeled_runs"] == 3
+        assert levels["unlabeled_runs"] == 0
+        assert levels["counts"] == {
+            "L0": 2,
+            "L1": 0,
+            "L2": 0,
+            "L3": 0,
+            "L4": 0,
+            "L5": 1,
+        }
+        assert levels["rates"]["L0"] == pytest.approx(2 / 3)
+        assert levels["rates"]["L5"] == pytest.approx(1 / 3)
+        assert [run["run_id"] for run in levels["runs"]["L5"]] == [run_dirs[0].name]
+        assert levels["runs"]["L5"][0]["path"] == str(
+            run_dirs[0].relative_to(tmp_path)
+        )
+        assert summary["by_task"][couple.id]["trajectory_levels"] == levels
+
+        # Old index entries do not contain trajectory_level; rebuild from result.json.
+        index_path = tmp_path / INDEX_FILENAME
+        old_entries = [
+            {key: value for key, value in json.loads(line).items() if key != "trajectory_level"}
+            for line in index_path.read_text().splitlines()
+        ]
+        index_path.write_text(
+            "".join(json.dumps(entry) + "\n" for entry in old_entries)
+        )
+        persistence._write_asr_summary(persistence.load_index())
+        summary = json.loads((tmp_path / ASR_FILENAME).read_text())
+        assert summary["trajectory_levels"]["counts"]["L0"] == 2
+        assert summary["trajectory_levels"]["counts"]["L5"] == 1
 
         persistence.remove_index_entries_by_paths({run_dirs[0].relative_to(tmp_path)})
         summary = json.loads((tmp_path / ASR_FILENAME).read_text())
         assert summary["asr"] == 0.0
         assert summary["attack_successes"] == 0
         assert summary["recorded_runs"] == 2
+        assert summary["trajectory_levels"]["counts"]["L0"] == 2
+        assert summary["trajectory_levels"]["counts"]["L5"] == 0
+        assert summary["trajectory_levels"]["runs"]["L5"] == []
 
     def test_success_case_model_name_prefers_mini_swe_config_specs(
         self,

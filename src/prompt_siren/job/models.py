@@ -159,6 +159,7 @@ class RunIndexEntry(BaseModel):
     timestamp: datetime
     benign_score: float | None
     attack_score: float | None
+    trajectory_level: Literal["L0", "L1", "L2", "L3", "L4", "L5"] | None = None
     exception_type: str | None = None  # None if successful
     path: Path  # Relative path to run directory from job directory
 

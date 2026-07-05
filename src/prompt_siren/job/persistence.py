@@ -58,6 +58,8 @@ from .naming import sanitize_for_filename
 
 EnvStateT = TypeVar("EnvStateT")
 
+_TRAJECTORY_LEVELS = ("L0", "L1", "L2", "L3", "L4", "L5")
+
 
 class JobPersistence:
     """Manages persistence for a single job's task executions.
@@ -425,6 +427,7 @@ class JobPersistence:
             timestamp=now,
             benign_score=benign_score,
             attack_score=attack_score,
+            trajectory_level=trajectory_level,
             exception_type=exception_info.exception_type if exception_info else None,
             path=run_dir.relative_to(self.job_dir),
         )
@@ -547,6 +550,7 @@ class JobPersistence:
             timestamp=now,
             benign_score=benign_score,
             attack_score=attack_score,
+            trajectory_level=trajectory_level,
             exception_type=exception_info.exception_type if exception_info else None,
             path=run_dir.relative_to(self.job_dir),
             update_asr=True,
@@ -586,6 +590,7 @@ class JobPersistence:
         timestamp: datetime,
         benign_score: float | None,
         attack_score: float | None,
+        trajectory_level: UptakeLevel | None,
         exception_type: str | None,
         path: Path,
         update_asr: bool = False,
@@ -600,6 +605,7 @@ class JobPersistence:
             timestamp=timestamp,
             benign_score=benign_score,
             attack_score=attack_score,
+            trajectory_level=trajectory_level,
             exception_type=exception_type,
             path=path,
         )
@@ -621,6 +627,21 @@ class JobPersistence:
                 if (line := raw_line.strip())
             ]
 
+    def _entry_trajectory_level(self, entry: RunIndexEntry) -> str | None:
+        if entry.trajectory_level in _TRAJECTORY_LEVELS:
+            return entry.trajectory_level
+
+        result_path = self.job_dir / entry.path / TASK_RESULT_FILENAME
+        try:
+            result = TaskRunResult.model_validate_json(result_path.read_text())
+        except (OSError, ValueError):
+            return None
+        return (
+            result.trajectory_level
+            if result.trajectory_level in _TRAJECTORY_LEVELS
+            else None
+        )
+
     def _write_asr_summary(self, entries: list[RunIndexEntry]) -> None:
         threshold = 1.0
 
@@ -635,6 +656,25 @@ class JobPersistence:
             unscored = sum(
                 entry.exception_type is None and entry.attack_score is None for entry in group
             )
+            level_runs: dict[str, list[dict[str, str]]] = {
+                level: [] for level in _TRAJECTORY_LEVELS
+            }
+            unlabeled_run_details: list[dict[str, str]] = []
+            for entry in group:
+                run_reference = {
+                    "task_id": entry.task_id,
+                    "run_id": entry.run_id,
+                    "path": str(entry.path),
+                }
+                level = self._entry_trajectory_level(entry)
+                if level is None:
+                    unlabeled_run_details.append(run_reference)
+                else:
+                    level_runs[level].append(run_reference)
+
+            level_counts = {
+                level: len(level_runs[level]) for level in _TRAJECTORY_LEVELS
+            }
             return {
                 "asr": successes / len(valid) if valid else None,
                 "mean_attack_score": (
@@ -649,6 +689,18 @@ class JobPersistence:
                 "recorded_runs": len(group),
                 "failed_runs": failed,
                 "unscored_runs": unscored,
+                "trajectory_levels": {
+                    "rates_denominator": "recorded_runs",
+                    "labeled_runs": sum(level_counts.values()),
+                    "unlabeled_runs": len(unlabeled_run_details),
+                    "counts": level_counts,
+                    "rates": {
+                        level: level_counts[level] / len(group) if group else None
+                        for level in _TRAJECTORY_LEVELS
+                    },
+                    "runs": level_runs,
+                    "unlabeled_run_details": unlabeled_run_details,
+                },
             }
 
         by_task: dict[str, list[RunIndexEntry]] = {}
@@ -656,7 +708,7 @@ class JobPersistence:
             by_task.setdefault(entry.task_id, []).append(entry)
 
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "job_name": self.job_config.job_name,
             "execution_mode": self.job_config.execution_mode,
             "updated_at": datetime.now().isoformat(),
