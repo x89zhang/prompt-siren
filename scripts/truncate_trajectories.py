@@ -372,6 +372,7 @@ def truncate_one(
     cut_source: CutSource,
     occurrence: int,
     include_trigger: bool,
+    keep_message_counts: list[int],
     payload_offsets: list[int],
     payload_match: PayloadMatch,
     output_dir: Path | None,
@@ -438,6 +439,60 @@ def truncate_one(
             "cut_source": cut_source,
             "occurrence": occurrence,
             "trigger_message_index": index,
+            "kept_message_count": keep_count,
+            "original_message_count": len(messages),
+            "truncated_trajectory_level": truncated_labels["trajectory_level"],
+            "status": "planned",
+        }
+        records.append(
+            write_truncated_record(
+                record=record,
+                truncated_execution=truncated_execution,
+                truncated_result=truncated_result,
+                output_dir=output_dir,
+                resume_job_dir=resume_job_dir,
+                root=root,
+                execution_path=execution_path,
+                suffix=suffix,
+            )
+        )
+
+    for keep_count in keep_message_counts:
+        if keep_count < 0 or keep_count > len(messages):
+            records.append(
+                {
+                    "source_execution_path": str(execution_path),
+                    "method": "message_count",
+                    "keep_message_count": keep_count,
+                    "original_message_count": len(messages),
+                    "status": "count_out_of_range",
+                }
+            )
+            continue
+
+        truncation = {
+            "method": "message_count",
+            "keep_message_count": keep_count,
+        }
+        suffix = f"message_count_{keep_count}"
+        truncated_labels = truncate_labels(labels, keep_count)
+        truncated_execution = truncate_execution(
+            execution,
+            keep_count=keep_count,
+        )
+        truncated_result = truncate_result(
+            result,
+            execution=truncated_execution,
+            trajectory_level=truncated_labels["trajectory_level"],
+            keep_count=keep_count,
+            source_execution_path=execution_path,
+            truncation=truncation,
+        )
+
+        record = {
+            "source_execution_path": str(execution_path),
+            "method": "message_count",
+            "keep_message_count": keep_count,
             "kept_message_count": keep_count,
             "original_message_count": len(messages),
             "truncated_trajectory_level": truncated_labels["trajectory_level"],
@@ -568,6 +623,16 @@ def parse_payload_offset(value: str) -> int:
     return offset
 
 
+def parse_keep_message_count(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("message count must be an integer") from e
+    if count < 0:
+        raise argparse.ArgumentTypeError("message count must be non-negative")
+    return count
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Truncate Prompt Siren execution trajectories at selected message points."
@@ -609,6 +674,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--skip-labels",
         action="store_true",
         help="Do not create the default label-based truncations.",
+    )
+    parser.add_argument(
+        "--keep-message-count",
+        nargs="+",
+        type=parse_keep_message_count,
+        default=[],
+        help=(
+            "Create truncations that keep exactly the first N messages. "
+            "Can be provided with one or more counts, for example: "
+            "--keep-message-count 20 40."
+        ),
     )
     parser.add_argument(
         "--payload-offsets",
@@ -661,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
                 cut_source=args.cut_source,
                 occurrence=args.occurrence,
                 include_trigger=not args.before_trigger,
+                keep_message_counts=args.keep_message_count,
                 payload_offsets=args.payload_offsets,
                 payload_match=args.payload_match,
                 output_dir=args.output_dir,
