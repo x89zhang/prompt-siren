@@ -54,13 +54,27 @@ class ExecutionConfig(BaseModel):
 class TrajectoryLabelingConfig(BaseModel):
     """Configuration for trajectory uptake labeling."""
 
-    method: Literal["hybrid", "judge_audit"] = Field(
+    method: Literal["hybrid", "judge_audit", "attack_relation"] = Field(
         default="hybrid",
         description=(
             "Automatic trajectory labeling method. 'hybrid' uses rules plus old-path "
             "L2/L3 semantic judges; 'judge_audit' first uses an LLM relevance filter, "
-            "then applies hybrid labeling to attack-related messages."
+            "then applies hybrid labeling to attack-related messages; 'attack_relation' "
+            "exports unlabeled agent, observation, and transition units for bottom-up "
+            "attack-conditioned topic discovery."
         ),
+    )
+
+    attack_relation_include_attack_context_in_documents: bool = Field(
+        default=True,
+        description=(
+            "Include the available attack context in raw and normalized discovery documents."
+        ),
+    )
+    attack_relation_schema_version: str = Field(
+        default="v1",
+        min_length=1,
+        description="Schema version stored with unlabeled analysis-unit output.",
     )
 
     l2_reaction_judge_enabled: bool = Field(

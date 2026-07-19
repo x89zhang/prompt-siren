@@ -86,8 +86,9 @@ agentdojo = ["agentdojo>=0.1.35"]
 swebench = ["swebench", "jinja2>=3.1.6"]
 docker = ["aiodocker>=0.24.0"]
 playwright = ["playwright>=1.54.0"]
+topics = ["bertopic==0.17.4"]
 all = [
-    "prompt-siren[agentdojo,swebench,docker,playwright]",
+    "prompt-siren[agentdojo,swebench,docker,playwright,topics]",
 ]
 ufmt = [
     "black==25.12.0",

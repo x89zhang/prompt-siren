@@ -48,6 +48,7 @@ class TaskRunResult(BaseModel):
     benign_score: float | None = None
     attack_score: float | None = None
     trajectory_level: Literal["L0", "L1", "L2", "L3", "L4", "L5"] | None = None
+    classification_method: Literal["hybrid", "judge_audit", "attack_relation"] | None = None
     attacks: dict[str, Any] | None = None
     exception_info: ExceptionInfo | None = None
 
@@ -65,6 +66,7 @@ class TaskRunExecution(BaseModel):
     usage: RunUsage
     attacks: dict[str, Any] | None = None  # Generated attacks
     trajectory_labels: dict[str, Any] | None = None
+    attack_analysis: dict[str, Any] | None = None
     resume_state: TaskRunResumeState | None = None
 
 
@@ -79,6 +81,7 @@ class TaskRunExecutionMetadata(BaseModel):
     span_id: str | None = None
     attacks: dict[str, Any] | None = None
     trajectory_labels: dict[str, Any] | None = None
+    attack_analysis: dict[str, Any] | None = None
 
 
 class TaskRunResumeState(BaseModel):
@@ -160,6 +163,7 @@ class RunIndexEntry(BaseModel):
     benign_score: float | None
     attack_score: float | None
     trajectory_level: Literal["L0", "L1", "L2", "L3", "L4", "L5"] | None = None
+    classification_method: Literal["hybrid", "judge_audit", "attack_relation"] | None = None
     exception_type: str | None = None  # None if successful
     path: Path  # Relative path to run directory from job directory
 
@@ -174,5 +178,6 @@ TASK_RESULT_FILENAME = "result.json"
 TASK_EXECUTION_FILENAME = "execution.json"
 TASK_EXECUTION_METADATA_FILENAME = "execution_metadata.json"
 TASK_ATTACK_CHAIN_FILENAME = "attack_chain.json"
+TASK_ATTACK_ANALYSIS_FILENAME = "attack_analysis_units.json"
 TASK_TOOL_REPLAY_FILENAME = "tool_replay.json"
 TASK_TOOL_HISTORY_FILENAME = "tool_history.json"

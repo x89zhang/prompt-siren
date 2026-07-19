@@ -24,6 +24,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.usage import RunUsage
 
+from ..attack_relation_classification import AttackRelationAnalysis
 from ..attack_success_cases import record_attack_success_case
 from ..tasks import EvaluationResult, Task, TaskCouple
 from ..trajectory_labeling import label_trajectory, LEVEL_RANK, TrajectoryLabels, UptakeLevel
@@ -40,6 +41,7 @@ from .models import (
     INDEX_FILENAME,
     JobConfig,
     RunIndexEntry,
+    TASK_ATTACK_ANALYSIS_FILENAME,
     TASK_ATTACK_CHAIN_FILENAME,
     TASK_EXECUTION_FILENAME,
     TASK_EXECUTION_METADATA_FILENAME,
@@ -75,6 +77,7 @@ class JobPersistence:
                     execution.json   # Raw execution trace and checkpoint
                     execution_metadata.json  # Attacks and trajectory labels
                     attack_chain.json  # Non-L0 messages extracted from trace
+                    attack_analysis_units.json  # Unlabeled discovery units
                 <run_id>/
                     ...
     """
@@ -176,6 +179,7 @@ class JobPersistence:
             execution,
             attacks=attacks_dict,
             trajectory_labels=None,
+            attack_analysis=None,
         )
         return run_dir
 
@@ -194,6 +198,7 @@ class JobPersistence:
             update={
                 "attacks": metadata.attacks,
                 "trajectory_labels": metadata.trajectory_labels,
+                "attack_analysis": metadata.attack_analysis,
             }
         )
 
@@ -229,6 +234,7 @@ class JobPersistence:
         *,
         attacks: dict[str, Any] | None,
         trajectory_labels: dict[str, Any] | None,
+        attack_analysis: dict[str, Any] | None,
     ) -> None:
         execution_path = run_dir / TASK_EXECUTION_FILENAME
         tmp_path = execution_path.with_suffix(f"{execution_path.suffix}.tmp")
@@ -236,14 +242,14 @@ class JobPersistence:
             f.write(
                 execution.model_dump_json(
                     indent=2,
-                    exclude={"attacks", "trajectory_labels"},
+                    exclude={"attacks", "trajectory_labels", "attack_analysis"},
                 )
             )
         tmp_path.replace(execution_path)
         self._save_tool_history_file(run_dir, execution)
 
         metadata_path = run_dir / TASK_EXECUTION_METADATA_FILENAME
-        if attacks is None and trajectory_labels is None:
+        if attacks is None and trajectory_labels is None and attack_analysis is None:
             return
 
         metadata = TaskRunExecutionMetadata(
@@ -255,6 +261,7 @@ class JobPersistence:
             span_id=execution.span_id,
             attacks=attacks,
             trajectory_labels=trajectory_labels,
+            attack_analysis=attack_analysis,
         )
         tmp_metadata_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
         with open(tmp_metadata_path, "w") as f:
@@ -263,6 +270,32 @@ class JobPersistence:
 
         if trajectory_labels is not None:
             self._save_attack_chain_file(run_dir, execution, trajectory_labels)
+        if attack_analysis is not None:
+            self._save_attack_analysis_file(run_dir, execution, attack_analysis)
+
+    def _save_attack_analysis_file(
+        self,
+        run_dir: Path,
+        execution: TaskRunExecution,
+        attack_analysis: dict[str, Any],
+    ) -> None:
+        payload = {
+            "task_id": execution.task_id,
+            "run_id": execution.run_id,
+            "execution_id": execution.execution_id,
+            "timestamp": execution.timestamp.isoformat(),
+            "trace_id": execution.trace_id,
+            "span_id": execution.span_id,
+            **attack_analysis,
+        }
+        trajectory_id = f"{execution.task_id}/{execution.run_id}"
+        for unit in payload.get("units", []):
+            if isinstance(unit, dict):
+                unit["trajectory_id"] = trajectory_id
+        destination = run_dir / TASK_ATTACK_ANALYSIS_FILENAME
+        temporary = destination.with_suffix(f"{destination.suffix}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n")
+        temporary.replace(destination)
 
     def _save_attack_chain_file(
         self,
@@ -329,6 +362,7 @@ class JobPersistence:
         attack_score: float | None = None,
         trajectory_level: UptakeLevel | None = None,
         trajectory_labels: TrajectoryLabels | None = None,
+        attack_analysis: AttackRelationAnalysis | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Save a single task run result and execution data.
@@ -375,13 +409,14 @@ class JobPersistence:
         if generated_attacks:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
-        if trajectory_labels is None:
+        classification_method = self.job_config.trajectory_labeling.method
+        if trajectory_labels is None and classification_method != "attack_relation":
             trajectory_labels = label_trajectory(
                 messages,
                 attacks=attacks_dict,
                 attack_score=attack_score,
             )
-        if trajectory_level is None:
+        if trajectory_level is None and trajectory_labels is not None:
             trajectory_level = trajectory_labels.trajectory_level
 
         # Save result.json (lightweight)
@@ -393,6 +428,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            classification_method=classification_method,
             attacks=attacks_dict,
             exception_info=exception_info,
         )
@@ -411,13 +447,15 @@ class JobPersistence:
             messages=messages,
             usage=usage,
             attacks=attacks_dict,
-            trajectory_labels=trajectory_labels.to_json(),
+            trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
+            attack_analysis=attack_analysis.to_json() if attack_analysis else None,
         )
         self._save_execution_files(
             run_dir,
             execution,
             attacks=attacks_dict,
-            trajectory_labels=trajectory_labels.to_json(),
+            trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
+            attack_analysis=attack_analysis.to_json() if attack_analysis else None,
         )
 
         # Update index
@@ -428,6 +466,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            classification_method=classification_method,
             exception_type=exception_info.exception_type if exception_info else None,
             path=run_dir.relative_to(self.job_dir),
         )
@@ -447,6 +486,7 @@ class JobPersistence:
         generated_attacks: Mapping[str, InjectionAttack] | None = None,
         trajectory_level: UptakeLevel | None = None,
         trajectory_labels: TrajectoryLabels | None = None,
+        attack_analysis: AttackRelationAnalysis | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Save a task couple run result and execution data.
@@ -498,13 +538,14 @@ class JobPersistence:
         if generated_attacks:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
-        if trajectory_labels is None:
+        classification_method = self.job_config.trajectory_labeling.method
+        if trajectory_labels is None and classification_method != "attack_relation":
             trajectory_labels = label_trajectory(
                 messages,
                 attacks=attacks_dict,
                 attack_score=attack_score,
             )
-        if trajectory_level is None:
+        if trajectory_level is None and trajectory_labels is not None:
             trajectory_level = trajectory_labels.trajectory_level
 
         # Save result.json (lightweight)
@@ -516,6 +557,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            classification_method=classification_method,
             attacks=attacks_dict,
             exception_info=exception_info,
         )
@@ -534,13 +576,15 @@ class JobPersistence:
             messages=messages,
             usage=usage,
             attacks=attacks_dict,
-            trajectory_labels=trajectory_labels.to_json(),
+            trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
+            attack_analysis=attack_analysis.to_json() if attack_analysis else None,
         )
         self._save_execution_files(
             run_dir,
             execution,
             attacks=attacks_dict,
-            trajectory_labels=trajectory_labels.to_json(),
+            trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
+            attack_analysis=attack_analysis.to_json() if attack_analysis else None,
         )
 
         # Update index
@@ -551,6 +595,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            classification_method=classification_method,
             exception_type=exception_info.exception_type if exception_info else None,
             path=run_dir.relative_to(self.job_dir),
             update_asr=True,
@@ -591,6 +636,7 @@ class JobPersistence:
         benign_score: float | None,
         attack_score: float | None,
         trajectory_level: UptakeLevel | None,
+        classification_method: str | None,
         exception_type: str | None,
         path: Path,
         update_asr: bool = False,
@@ -606,6 +652,7 @@ class JobPersistence:
             benign_score=benign_score,
             attack_score=attack_score,
             trajectory_level=trajectory_level,
+            classification_method=classification_method,
             exception_type=exception_type,
             path=path,
         )

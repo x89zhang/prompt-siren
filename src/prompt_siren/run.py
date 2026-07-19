@@ -42,6 +42,10 @@ from .agents.states import (
     ModelRequestState,
     ModelResponseState,
 )
+from .attack_relation_classification import (
+    AttackRelationAnalysis,
+    build_attack_relation_analysis,
+)
 from .attacks.abstract import AbstractAttack
 from .environments.abstract import AbstractEnvironment
 from .job import JobPersistence
@@ -209,6 +213,9 @@ async def _label_trajectory_for_result(
     if persistence is None:
         return None
 
+    if persistence.job_config.trajectory_labeling.method == "attack_relation":
+        return None
+
     try:
         labeling_config = persistence.job_config.trajectory_labeling
         judge_model = None
@@ -279,6 +286,28 @@ async def _label_trajectory_for_result(
         return None
 
     return labels
+
+
+def _build_attack_analysis_for_result(
+    *,
+    messages: Sequence[ModelMessage],
+    persistence: JobPersistence | None,
+    generated_attacks: Mapping[str, InjectionAttack] | None,
+) -> AttackRelationAnalysis | None:
+    if persistence is None:
+        return None
+    config = persistence.job_config.trajectory_labeling
+    if config.method != "attack_relation":
+        return None
+
+    return build_attack_relation_analysis(
+        messages,
+        attacks=generated_attacks,
+        schema_version=config.attack_relation_schema_version,
+        include_attack_context_in_documents=(
+            config.attack_relation_include_attack_context_in_documents
+        ),
+    )
 
 
 def _log_single_task_result(
@@ -719,6 +748,11 @@ async def _run_single_task_without_attack(
                         generated_attacks=None,
                         attack_score=None,
                     )
+                    attack_analysis = _build_attack_analysis_for_result(
+                        messages=list(result_ctx.messages),
+                        persistence=persistence,
+                        generated_attacks=None,
+                    )
                     persistence.save_task_run(
                         task=task,
                         evaluation=evaluation,
@@ -730,6 +764,7 @@ async def _run_single_task_without_attack(
                             trajectory_labels.trajectory_level if trajectory_labels else None
                         ),
                         trajectory_labels=trajectory_labels,
+                        attack_analysis=attack_analysis,
                         run_id=run_id,
                     )
 
@@ -1047,6 +1082,11 @@ async def _run_task_couple_with_attack(
                         generated_attacks=generated_attacks,
                         attack_score=malicious_score,
                     )
+                    attack_analysis = _build_attack_analysis_for_result(
+                        messages=list(result_ctx.messages),
+                        persistence=persistence,
+                        generated_attacks=generated_attacks,
+                    )
                     persistence.save_couple_run(
                         couple=couple,
                         benign_eval=benign_eval,
@@ -1060,6 +1100,7 @@ async def _run_task_couple_with_attack(
                             trajectory_labels.trajectory_level if trajectory_labels else None
                         ),
                         trajectory_labels=trajectory_labels,
+                        attack_analysis=attack_analysis,
                         run_id=run_id,
                     )
 
