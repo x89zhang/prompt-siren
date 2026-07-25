@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Discover provisional attack-conditioned topics from unlabeled analysis units."""
+"""Discover behavior topics and rank them by payload proximity."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import re
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from prompt_siren.attack_relation_classification import normalize_document
+
 ANALYSIS_FILENAME = "attack_analysis_units.json"
 DocumentView = Literal["raw", "normalized"]
+EmbeddingConditioning = Literal["behavior_only", "attack_context_plus_behavior"]
+DEFAULT_VERBATIM_PAYLOAD_MIN_CHARS = 32
 STRUCTURAL_STOP_WORDS = {
     "abs_path",
     "abspath",
@@ -55,8 +62,8 @@ def _behavior_document(conditioned_document: str) -> str:
     return conditioned_document[marker_index:].strip()
 
 
-def _attack_document(payload: dict[str, Any]) -> str | None:
-    """Extract payload text without copying it into persisted assignments."""
+def _attack_documents(payload: dict[str, Any]) -> list[str]:
+    """Extract each textual payload without copying it into persisted assignments."""
     sections: list[str] = []
     for item in payload.get("attack_context", []):
         if not isinstance(item, dict):
@@ -64,20 +71,38 @@ def _attack_document(payload: dict[str, Any]) -> str | None:
         content = item.get("content")
         if isinstance(content, str) and content.strip():
             sections.append(content.strip())
+    return sections
+
+
+def _attack_document(payload: dict[str, Any]) -> str | None:
+    sections = _attack_documents(payload)
     return "\n\n---\n\n".join(sections) or None
 
 
 def collect_documents(
-    job_dir: Path,
+    job_dirs: Path | Sequence[Path],
     *,
     document_view: DocumentView,
     group_by_tool: bool = False,
+    reference_root: Path | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Collect every unlabeled unit; no relation-based filtering is applied."""
+    input_dirs = [job_dirs] if isinstance(job_dirs, Path) else list(job_dirs)
+    resolved_dirs = [path.resolve() for path in input_dirs]
+    if not resolved_dirs:
+        raise ValueError("At least one job directory is required")
+    for path in resolved_dirs:
+        if not path.is_dir():
+            raise FileNotFoundError(f"Job directory not found: {path}")
+    resolved_root = (reference_root or common_reference_root(resolved_dirs)).resolve()
     document_key = f"{document_view}_document"
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for path in sorted(job_dir.rglob(ANALYSIS_FILENAME)):
+    analysis_paths = sorted(
+        {path.resolve() for job_dir in resolved_dirs for path in job_dir.rglob(ANALYSIS_FILENAME)}
+    )
+    for path in analysis_paths:
         payload = json.loads(path.read_text())
+        attack_documents = _attack_documents(payload)
         attack_document = _attack_document(payload)
         for unit in payload.get("units", []):
             if not isinstance(unit, dict):
@@ -98,6 +123,7 @@ def collect_documents(
                     "embedding_document": document,
                     "topic_document": _behavior_document(document),
                     "attack_document": attack_document,
+                    "attack_documents": attack_documents,
                     "unit_id": unit.get("unit_id"),
                     "unit_type": unit.get("unit_type"),
                     "trajectory_id": unit.get("trajectory_id"),
@@ -114,10 +140,101 @@ def collect_documents(
                     "observation_event_id": unit.get("observation_event_id"),
                     "next_assistant_event_id": unit.get("next_assistant_event_id"),
                     "attack_context_status": unit.get("attack_context_status"),
-                    "source_file": str(path.relative_to(job_dir)),
+                    "source_file": str(path.relative_to(resolved_root)),
+                    "source_job_dir": str(
+                        next(
+                            job_dir.relative_to(resolved_root)
+                            for job_dir in resolved_dirs
+                            if path.is_relative_to(job_dir)
+                        )
+                    ),
                 }
             )
     return dict(groups)
+
+
+def common_reference_root(job_dirs: Sequence[Path]) -> Path:
+    """Return a stable root from which all source_file references are relative."""
+    resolved_dirs = [path.resolve() for path in job_dirs]
+    if not resolved_dirs:
+        raise ValueError("At least one job directory is required")
+    if len(resolved_dirs) == 1:
+        return resolved_dirs[0]
+    return Path(os.path.commonpath([str(path) for path in resolved_dirs]))
+
+
+def _canonical_match_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _verbatim_payload_match_length(
+    record: dict[str, Any],
+    *,
+    document_view: DocumentView,
+    min_chars: int,
+) -> int | None:
+    behavior = record.get("topic_document")
+    if not isinstance(behavior, str):
+        return None
+    canonical_behavior = _canonical_match_text(behavior)
+    for payload in record.get("attack_documents", []):
+        if not isinstance(payload, str):
+            continue
+        comparable_payload = (
+            normalize_document(payload) if document_view == "normalized" else payload
+        )
+        canonical_payload = _canonical_match_text(comparable_payload)
+        if len(canonical_payload) >= min_chars and canonical_payload in canonical_behavior:
+            return len(canonical_payload)
+    return None
+
+
+def filter_verbatim_payload_units(
+    groups: dict[str, list[dict[str, Any]]],
+    *,
+    document_view: DocumentView,
+    enabled: bool = True,
+    min_chars: int = DEFAULT_VERBATIM_PAYLOAD_MIN_CHARS,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Exclude units whose behavior contains a complete textual attack payload."""
+    kept: dict[str, list[dict[str, Any]]] = {}
+    excluded: list[dict[str, Any]] = []
+    excluded_by_group: dict[str, int] = {}
+    for group_name, records in groups.items():
+        kept_records: list[dict[str, Any]] = []
+        for record in records:
+            match_length = (
+                _verbatim_payload_match_length(
+                    record,
+                    document_view=document_view,
+                    min_chars=min_chars,
+                )
+                if enabled
+                else None
+            )
+            if match_length is None:
+                kept_records.append(record)
+                continue
+            excluded_by_group[group_name] = excluded_by_group.get(group_name, 0) + 1
+            excluded.append(
+                {
+                    **_sample_record(record),
+                    "group": group_name,
+                    "exclusion_reason": "behavior_contains_complete_payload",
+                    "matched_payload_chars": match_length,
+                }
+            )
+        if kept_records:
+            kept[group_name] = kept_records
+    return kept, {
+        "enabled": enabled,
+        "policy": "exclude_behavior_containing_complete_payload",
+        "comparison": f"{document_view}_payload_substring_in_behavior_only",
+        "min_payload_chars": min_chars,
+        "excluded_unit_count": len(excluded),
+        "excluded_by_group": excluded_by_group,
+        "excluded_units": excluded,
+    }
 
 
 def _json_default(value: Any) -> Any:
@@ -160,6 +277,7 @@ def _sample_record(record: dict[str, Any]) -> dict[str, Any]:
             "observation_event_id",
             "next_assistant_event_id",
             "source_file",
+            "source_job_dir",
             "topic_id",
             "topic_namespace",
             "topic_membership_probability",
@@ -217,9 +335,7 @@ def _rank_topics_by_attack_similarity(
     info_by_topic = {int(topic["Topic"]): topic for topic in topic_info}
     for topic_id, values in values_by_topic.items():
         if topic_id in info_by_topic:
-            info_by_topic[topic_id]["attack_similarity"] = _attack_similarity_summary(
-                values
-            )
+            info_by_topic[topic_id]["attack_similarity"] = _attack_similarity_summary(values)
 
     ranked = sorted(
         (
@@ -271,12 +387,8 @@ def build_review_samples(
         )
         random_records = rng.sample(records, min(samples_per_bucket, len(records)))
         topics[str(topic_id)] = {
-            "representative": [
-                _sample_record(record) for record in ranked[:samples_per_bucket]
-            ],
-            "boundary": [
-                _sample_record(record) for record in ranked[-samples_per_bucket:]
-            ],
+            "representative": [_sample_record(record) for record in ranked[:samples_per_bucket]],
+            "boundary": [_sample_record(record) for record in ranked[-samples_per_bucket:]],
             "random": [_sample_record(record) for record in random_records],
         }
 
@@ -300,6 +412,7 @@ def fit_topics(
     samples_per_bucket: int,
     random_seed: int,
     embedding_model_name: str,
+    embedding_conditioning: EmbeddingConditioning = "behavior_only",
 ) -> dict[str, Any]:
     try:
         from bertopic import BERTopic
@@ -329,32 +442,38 @@ def fit_topics(
         attack_documents = [record.get("attack_document") for record in records]
         unique_attack_documents = list(
             dict.fromkeys(
-                document
-                for document in attack_documents
-                if isinstance(document, str) and document
+                document for document in attack_documents if isinstance(document, str) and document
             )
         )
-        all_documents = [
-            *embedding_documents,
-            *topic_documents,
-            *unique_attack_documents,
-        ]
+        if embedding_conditioning == "behavior_only":
+            all_documents = [*topic_documents, *unique_attack_documents]
+            attack_embedding_offset = len(topic_documents)
+        else:
+            all_documents = [
+                *embedding_documents,
+                *topic_documents,
+                *unique_attack_documents,
+            ]
+            attack_embedding_offset = len(embedding_documents) + len(topic_documents)
         all_embeddings = embedding_model.encode(
             all_documents,
             show_progress_bar=True,
         )
         document_count = len(records)
-        embeddings = all_embeddings[:document_count]
-        behavior_embeddings = all_embeddings[document_count : 2 * document_count]
+        if embedding_conditioning == "behavior_only":
+            behavior_embeddings = all_embeddings[:document_count]
+            embeddings = behavior_embeddings
+        else:
+            embeddings = all_embeddings[:document_count]
+            behavior_embeddings = all_embeddings[document_count : 2 * document_count]
         attack_embeddings = {
-            document: all_embeddings[2 * document_count + index]
+            document: all_embeddings[attack_embedding_offset + index]
             for index, document in enumerate(unique_attack_documents)
         }
         attack_similarities = [
             (
                 _cosine_similarity(behavior_embedding, attack_embeddings[attack_document])
-                if isinstance(attack_document, str)
-                and attack_document in attack_embeddings
+                if isinstance(attack_document, str) and attack_document in attack_embeddings
                 else None
             )
             for behavior_embedding, attack_document in zip(
@@ -371,12 +490,8 @@ def fit_topics(
             verbose=False,
         )
         topics, probabilities = model.fit_transform(topic_documents, embeddings=embeddings)
-        topic_info = _compact_topic_info(
-            model.get_topic_info().to_dict(orient="records")
-        )
-        model_id = (
-            f"{group_name.replace(':', '__')}_{document_view}_attack_conditioned_v2"
-        )
+        topic_info = _compact_topic_info(model.get_topic_info().to_dict(orient="records"))
+        model_id = f"{group_name.replace(':', '__')}_{document_view}_{embedding_conditioning}_v3"
         assignments: list[dict[str, Any]] = []
         for index, (record, topic, attack_similarity) in enumerate(
             zip(records, topics, attack_similarities, strict=True)
@@ -388,14 +503,17 @@ def fit_topics(
                         key: value
                         for key, value in record.items()
                         if key
-                        not in {"embedding_document", "topic_document", "attack_document"}
+                        not in {
+                            "embedding_document",
+                            "topic_document",
+                            "attack_document",
+                            "attack_documents",
+                        }
                     },
                     "model_id": model_id,
                     "topic_id": topic_id,
                     "topic_namespace": f"{group_name}/topic_{topic_id}",
-                    "topic_membership_probability": _membership_probability(
-                        probabilities, index
-                    ),
+                    "topic_membership_probability": _membership_probability(probabilities, index),
                     "attack_similarity": attack_similarity,
                     "status": "provisional",
                     "human_review_status": "unreviewed",
@@ -411,7 +529,7 @@ def fit_topics(
             "status": "fitted",
             "model_id": model_id,
             "document_view": document_view,
-            "embedding_input": "attack_context_plus_behavior",
+            "embedding_input": embedding_conditioning,
             "topic_representation_input": "behavior_only",
             "embedding_model": embedding_model_name,
             "attack_similarity_metric": "cosine(payload_only, behavior_only)",
@@ -436,7 +554,12 @@ def fit_topics(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("job_dir", type=Path)
+    parser.add_argument(
+        "job_dirs",
+        nargs="+",
+        type=Path,
+        help="One or more job directories to cluster together.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--document-view", choices=("raw", "normalized"), default="normalized")
@@ -450,27 +573,63 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-bucket", type=int, default=3)
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--embedding-model", default="all-MiniLM-L6-v2")
+    parser.add_argument(
+        "--embedding-conditioning",
+        choices=("behavior-only", "attack-context-plus-behavior"),
+        default="behavior-only",
+        help=(
+            "Text used for UMAP/HDBSCAN embeddings. Behavior-only is the default; "
+            "the attack-context option is retained for ablation."
+        ),
+    )
+    parser.add_argument(
+        "--include-verbatim-payload-units",
+        action="store_true",
+        help=(
+            "Disable the default filter that removes units whose behavior contains "
+            "a complete payload."
+        ),
+    )
+    parser.add_argument(
+        "--verbatim-payload-min-chars",
+        type=int,
+        default=DEFAULT_VERBATIM_PAYLOAD_MIN_CHARS,
+        help="Minimum canonical payload length eligible for complete-payload filtering.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    groups = collect_documents(
-        args.job_dir,
+    if len(args.job_dirs) > 1 and args.output is None:
+        raise SystemExit("--output is required when clustering multiple job directories")
+    reference_root = common_reference_root(args.job_dirs)
+    collected_groups = collect_documents(
+        args.job_dirs,
         document_view=args.document_view,
         group_by_tool=args.group_by_tool,
+        reference_root=reference_root,
+    )
+    groups, verbatim_payload_filter = filter_verbatim_payload_units(
+        collected_groups,
+        document_view=args.document_view,
+        enabled=not args.include_verbatim_payload_units,
+        min_chars=max(1, args.verbatim_payload_min_chars),
     )
     result = {
-        "job_dir": str(args.job_dir),
+        "job_dir": str(reference_root),
+        "input_job_dirs": [str(path.resolve()) for path in args.job_dirs],
         "output_schema_version": "v3",
         "document_storage": "referenced",
-        "embedding_conditioning": "attack_context_plus_behavior",
+        "embedding_conditioning": args.embedding_conditioning.replace("-", "_"),
         "topic_representation": "behavior_only",
         "attack_similarity_metric": "cosine(payload_only, behavior_only)",
         "discovery_stage": "provisional_topics",
         "document_view": args.document_view,
         "group_by_tool": args.group_by_tool,
+        "collected_document_count": sum(len(records) for records in collected_groups.values()),
         "input_document_count": sum(len(records) for records in groups.values()),
+        "verbatim_payload_filter": verbatim_payload_filter,
         **fit_topics(
             groups,
             document_view=args.document_view,
@@ -480,9 +639,10 @@ def main() -> None:
             samples_per_bucket=args.samples_per_bucket,
             random_seed=args.random_seed,
             embedding_model_name=args.embedding_model,
+            embedding_conditioning=args.embedding_conditioning.replace("-", "_"),
         ),
     }
-    destination = args.output or args.job_dir / "attack_relation_topics.json"
+    destination = args.output or args.job_dirs[0] / "attack_relation_topics.json"
     destination.write_text(json.dumps(result, indent=2, default=_json_default) + "\n")
     print(destination)
 

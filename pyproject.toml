@@ -35,6 +35,7 @@ dependencies = [
     "typing-extensions>=4.15.0",
     "openinference-instrumentation>=0.1.41",
     "submitit>=1.5.4",
+    "mini-swe-agent",
 ]
 
 [dependency-groups]
@@ -167,3 +168,4 @@ filterwarnings = [
 
 [tool.uv.sources]
 swebench = { git = "https://github.com/princeton-nlp/SWE-bench.git", rev = "v4.1.0" }
+mini-swe-agent = { path = "../mini-swe-agent", editable = true }
