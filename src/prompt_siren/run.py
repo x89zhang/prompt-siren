@@ -27,7 +27,9 @@ import anyio
 import logfire
 from logfire import LogfireSpan
 from pydantic_ai import InstrumentationSettings, RunContext
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from typing_extensions import assert_never
@@ -42,6 +44,12 @@ from .agents.states import (
     ModelRequestState,
     ModelResponseState,
 )
+from .attack_chain_judge import (
+    attack_context_items,
+    AttackChainJudgeAnalysis,
+    judge_attack_chain,
+)
+from .attack_chain_topic_retrieval import retrieve_attack_chain_candidates
 from .attack_relation_classification import (
     AttackRelationAnalysis,
     build_attack_relation_analysis,
@@ -174,17 +182,43 @@ def _calculate_evaluation_score(evaluation_result: EvaluationResult) -> float:
 
 
 def _labeling_model_for_agent(agent: AbstractAgent) -> tuple[object | None, object | None]:
-    config = getattr(agent, "config", None)
-    if config is not None and hasattr(config, "model"):
-        return config.model, getattr(config, "model_settings", None)
-
+    # mini-swe-agent uses LiteLLM-style model names such as
+    # ``hosted_vllm/qwen3.6-35b``. PydanticAI cannot infer that provider from
+    # the name alone, so preserve the OpenAI-compatible endpoint from the mini
+    # model config and construct the model explicitly.
     mini_config = getattr(agent, "_mini_config", None)
     if isinstance(mini_config, dict):
         model_config = mini_config.get("model", {})
         if isinstance(model_config, dict):
             model_name = model_config.get("model_name") or model_config.get("model")
+            model_kwargs = model_config.get("model_kwargs", {})
+            if not isinstance(model_kwargs, dict):
+                model_kwargs = {}
+            api_base = model_kwargs.get("api_base") or model_kwargs.get("base_url")
+            if isinstance(model_name, str) and model_name and isinstance(api_base, str):
+                if model_name.startswith("hosted_vllm/"):
+                    model_name = model_name.split("/", 1)[1]
+                api_key = model_kwargs.get("api_key") or "local-vllm"
+                return (
+                    OpenAIChatModel(
+                        model_name,
+                        provider=OpenAIProvider(base_url=api_base, api_key=str(api_key)),
+                    ),
+                    {
+                        "max_tokens": 4096,
+                        **(
+                            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+                            if "qwen" in model_name.casefold()
+                            else {}
+                        ),
+                    },
+                )
             if isinstance(model_name, str) and model_name:
                 return infer_model(_normalize_model_name_for_pydantic_ai(model_name)), None
+
+    config = getattr(agent, "config", None)
+    if config is not None and hasattr(config, "model"):
+        return config.model, getattr(config, "model_settings", None)
 
     return None, None
 
@@ -213,7 +247,10 @@ async def _label_trajectory_for_result(
     if persistence is None:
         return None
 
-    if persistence.job_config.trajectory_labeling.method == "attack_relation":
+    if persistence.job_config.trajectory_labeling.method in {
+        "attack_relation",
+        "attack_chain_judge",
+    }:
         return None
 
     try:
@@ -308,6 +345,76 @@ def _build_attack_analysis_for_result(
             config.attack_relation_include_attack_context_in_documents
         ),
     )
+
+
+async def _judge_attack_chain_for_result(
+    *,
+    messages: Sequence[ModelMessage],
+    agent: AbstractAgent,
+    persistence: JobPersistence | None,
+    generated_attacks: Mapping[str, InjectionAttack] | None,
+) -> AttackChainJudgeAnalysis | None:
+    if persistence is None:
+        return None
+    config = persistence.job_config.trajectory_labeling
+    if config.method != "attack_chain_judge":
+        return None
+
+    try:
+        try:
+            topic_retrieval = await anyio.to_thread.run_sync(
+                lambda: retrieve_attack_chain_candidates(
+                    messages,
+                    attacks=generated_attacks,
+                    top_topics_per_group=config.attack_chain_judge_top_topics_per_group,
+                    top_units_per_group=config.attack_chain_judge_top_units_per_group,
+                    min_topic_size=config.attack_chain_judge_min_topic_size,
+                    embedding_model_name=config.attack_chain_judge_embedding_model,
+                )
+            )
+            candidate_message_indices = topic_retrieval.get("candidate_message_indices")
+            if not candidate_message_indices:
+                candidate_message_indices = None
+                topic_retrieval["fallback"] = "full_trajectory_no_candidates"
+        except Exception as retrieval_exc:
+            candidate_message_indices = None
+            topic_retrieval = {
+                "status": "failed",
+                "fallback": "full_trajectory",
+                "error": f"{type(retrieval_exc).__name__}: {retrieval_exc}",
+            }
+
+        if config.attack_chain_judge_model:
+            judge_model = infer_model(config.attack_chain_judge_model)
+            judge_model_settings = None
+        else:
+            judge_model, judge_model_settings = _labeling_model_for_agent(agent)
+        judge_model_settings = {
+            **(judge_model_settings or {}),
+            "max_tokens": config.attack_chain_judge_max_output_tokens,
+        }
+        if judge_model is None:
+            raise ValueError("No compatible judge model could be inferred from the agent.")
+        return await judge_attack_chain(
+            messages,
+            attacks=generated_attacks,
+            model=judge_model,
+            model_settings=judge_model_settings,
+            schema_version=config.attack_chain_judge_schema_version,
+            max_attempts=config.attack_chain_judge_max_attempts,
+            candidate_message_indices=candidate_message_indices,
+            topic_retrieval=topic_retrieval,
+        )
+    except Exception as exc:
+        # Trajectory labeling is auxiliary analysis. A provider/configuration
+        # failure must never prevent task evaluation and result persistence.
+        return AttackChainJudgeAnalysis(
+            schema_version=config.attack_chain_judge_schema_version,
+            attack_context=attack_context_items(generated_attacks),
+            chain_observed=False,
+            chain_summary="Attack-chain judge failed before producing a valid chain.",
+            uncertainties=[f"judge failure: {type(exc).__name__}: {exc}"],
+        )
 
 
 def _log_single_task_result(
@@ -753,6 +860,12 @@ async def _run_single_task_without_attack(
                         persistence=persistence,
                         generated_attacks=None,
                     )
+                    attack_chain_judgment = await _judge_attack_chain_for_result(
+                        messages=list(result_ctx.messages),
+                        agent=agent,
+                        persistence=persistence,
+                        generated_attacks=None,
+                    )
                     persistence.save_task_run(
                         task=task,
                         evaluation=evaluation,
@@ -765,6 +878,7 @@ async def _run_single_task_without_attack(
                         ),
                         trajectory_labels=trajectory_labels,
                         attack_analysis=attack_analysis,
+                        attack_chain_judgment=attack_chain_judgment,
                         run_id=run_id,
                     )
 
@@ -1087,6 +1201,12 @@ async def _run_task_couple_with_attack(
                         persistence=persistence,
                         generated_attacks=generated_attacks,
                     )
+                    attack_chain_judgment = await _judge_attack_chain_for_result(
+                        messages=list(result_ctx.messages),
+                        agent=agent,
+                        persistence=persistence,
+                        generated_attacks=generated_attacks,
+                    )
                     persistence.save_couple_run(
                         couple=couple,
                         benign_eval=benign_eval,
@@ -1101,6 +1221,7 @@ async def _run_task_couple_with_attack(
                         ),
                         trajectory_labels=trajectory_labels,
                         attack_analysis=attack_analysis,
+                        attack_chain_judgment=attack_chain_judgment,
                         run_id=run_id,
                     )
 

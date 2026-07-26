@@ -54,14 +54,15 @@ class ExecutionConfig(BaseModel):
 class TrajectoryLabelingConfig(BaseModel):
     """Configuration for trajectory uptake labeling."""
 
-    method: Literal["hybrid", "judge_audit", "attack_relation"] = Field(
+    method: Literal["hybrid", "judge_audit", "attack_relation", "attack_chain_judge"] = Field(
         default="hybrid",
         description=(
             "Automatic trajectory labeling method. 'hybrid' uses rules plus old-path "
             "L2/L3 semantic judges; 'judge_audit' first uses an LLM relevance filter, "
             "then applies hybrid labeling to attack-related messages; 'attack_relation' "
             "exports unlabeled agent, observation, and transition units for bottom-up "
-            "attack-conditioned topic discovery."
+            "attack-conditioned topic discovery; 'attack_chain_judge' uses an LLM to "
+            "extract an evidence-grounded causal chain without L0-L5 labels."
         ),
     )
 
@@ -75,6 +76,53 @@ class TrajectoryLabelingConfig(BaseModel):
         default="v1",
         min_length=1,
         description="Schema version stored with unlabeled analysis-unit output.",
+    )
+
+    attack_chain_judge_schema_version: str = Field(
+        default="v2",
+        min_length=1,
+        description="Schema version stored with LLM-extracted attack-chain output.",
+    )
+    attack_chain_judge_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional dedicated PydanticAI judge model. Null reuses the tested agent model."
+        ),
+    )
+    attack_chain_judge_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum attempts to obtain a valid evidence-grounded attack chain.",
+    )
+    attack_chain_judge_max_output_tokens: int = Field(
+        default=4096,
+        ge=1,
+        description="Maximum output tokens for the attack-message selection judge.",
+    )
+    attack_chain_judge_top_topics_per_group: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Number of payload-nearest BERTopic clusters retained from each unit-type group."
+        ),
+    )
+    attack_chain_judge_top_units_per_group: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Number of payload-nearest individual units retained per group, plus up to "
+            "the same number of HDBSCAN outliers, as a recall safety net."
+        ),
+    )
+    attack_chain_judge_min_topic_size: int = Field(
+        default=3,
+        ge=2,
+        description="Minimum BERTopic cluster size for single-trajectory candidate retrieval.",
+    )
+    attack_chain_judge_embedding_model: str = Field(
+        default="all-MiniLM-L6-v2",
+        min_length=1,
+        description="Sentence-transformer model used for attack-chain candidate retrieval.",
     )
 
     l2_reaction_judge_enabled: bool = Field(

@@ -24,6 +24,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.usage import RunUsage
 
+from ..attack_chain_judge import AttackChainJudgeAnalysis, render_attack_chain_markdown
 from ..attack_relation_classification import AttackRelationAnalysis
 from ..attack_success_cases import record_attack_success_case
 from ..tasks import EvaluationResult, Task, TaskCouple
@@ -43,6 +44,8 @@ from .models import (
     RunIndexEntry,
     TASK_ATTACK_ANALYSIS_FILENAME,
     TASK_ATTACK_CHAIN_FILENAME,
+    TASK_ATTACK_CHAIN_JUDGE_FILENAME,
+    TASK_ATTACK_CHAIN_JUDGE_MARKDOWN_FILENAME,
     TASK_EXECUTION_FILENAME,
     TASK_EXECUTION_METADATA_FILENAME,
     TASK_RESULT_FILENAME,
@@ -77,6 +80,8 @@ class JobPersistence:
                     execution.json   # Raw execution trace and checkpoint
                     execution_metadata.json  # Attacks and trajectory labels
                     attack_chain.json  # Non-L0 messages extracted from trace
+                    attack_chain_judge.json  # LLM-extracted causal attack chain
+                    attack_chain_judge.md  # Human-readable chain rendered from JSON
                     attack_analysis_units.json  # Unlabeled discovery units
                 <run_id>/
                     ...
@@ -180,6 +185,7 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=None,
             attack_analysis=None,
+            attack_chain_judgment=None,
         )
         return run_dir
 
@@ -199,6 +205,7 @@ class JobPersistence:
                 "attacks": metadata.attacks,
                 "trajectory_labels": metadata.trajectory_labels,
                 "attack_analysis": metadata.attack_analysis,
+                "attack_chain_judgment": metadata.attack_chain_judgment,
             }
         )
 
@@ -235,6 +242,7 @@ class JobPersistence:
         attacks: dict[str, Any] | None,
         trajectory_labels: dict[str, Any] | None,
         attack_analysis: dict[str, Any] | None,
+        attack_chain_judgment: dict[str, Any] | None,
     ) -> None:
         execution_path = run_dir / TASK_EXECUTION_FILENAME
         tmp_path = execution_path.with_suffix(f"{execution_path.suffix}.tmp")
@@ -242,14 +250,24 @@ class JobPersistence:
             f.write(
                 execution.model_dump_json(
                     indent=2,
-                    exclude={"attacks", "trajectory_labels", "attack_analysis"},
+                    exclude={
+                        "attacks",
+                        "trajectory_labels",
+                        "attack_analysis",
+                        "attack_chain_judgment",
+                    },
                 )
             )
         tmp_path.replace(execution_path)
         self._save_tool_history_file(run_dir, execution)
 
         metadata_path = run_dir / TASK_EXECUTION_METADATA_FILENAME
-        if attacks is None and trajectory_labels is None and attack_analysis is None:
+        if (
+            attacks is None
+            and trajectory_labels is None
+            and attack_analysis is None
+            and attack_chain_judgment is None
+        ):
             return
 
         metadata = TaskRunExecutionMetadata(
@@ -262,6 +280,7 @@ class JobPersistence:
             attacks=attacks,
             trajectory_labels=trajectory_labels,
             attack_analysis=attack_analysis,
+            attack_chain_judgment=attack_chain_judgment,
         )
         tmp_metadata_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
         with open(tmp_metadata_path, "w") as f:
@@ -272,6 +291,36 @@ class JobPersistence:
             self._save_attack_chain_file(run_dir, execution, trajectory_labels)
         if attack_analysis is not None:
             self._save_attack_analysis_file(run_dir, execution, attack_analysis)
+        if attack_chain_judgment is not None:
+            self._save_attack_chain_judge_files(run_dir, execution, attack_chain_judgment)
+
+    def _save_attack_chain_judge_files(
+        self,
+        run_dir: Path,
+        execution: TaskRunExecution,
+        attack_chain_judgment: dict[str, Any],
+    ) -> None:
+        payload = {
+            "task_id": execution.task_id,
+            "run_id": execution.run_id,
+            "execution_id": execution.execution_id,
+            "timestamp": execution.timestamp.isoformat(),
+            "trace_id": execution.trace_id,
+            "span_id": execution.span_id,
+            **attack_chain_judgment,
+        }
+        json_path = run_dir / TASK_ATTACK_CHAIN_JUDGE_FILENAME
+        temporary_json = json_path.with_suffix(f"{json_path.suffix}.tmp")
+        temporary_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        temporary_json.replace(json_path)
+
+        markdown_path = run_dir / TASK_ATTACK_CHAIN_JUDGE_MARKDOWN_FILENAME
+        temporary_markdown = markdown_path.with_suffix(f"{markdown_path.suffix}.tmp")
+        temporary_markdown.write_text(
+            render_attack_chain_markdown(payload, execution.messages),
+            encoding="utf-8",
+        )
+        temporary_markdown.replace(markdown_path)
 
     def _save_attack_analysis_file(
         self,
@@ -314,9 +363,7 @@ class JobPersistence:
             "messages": _extract_attack_chain_messages(execution.messages, trajectory_labels),
         }
         attack_chain_path = run_dir / TASK_ATTACK_CHAIN_FILENAME
-        tmp_attack_chain_path = attack_chain_path.with_suffix(
-            f"{attack_chain_path.suffix}.tmp"
-        )
+        tmp_attack_chain_path = attack_chain_path.with_suffix(f"{attack_chain_path.suffix}.tmp")
         with open(tmp_attack_chain_path, "w") as f:
             json.dump(attack_chain, f, indent=2)
         tmp_attack_chain_path.replace(attack_chain_path)
@@ -343,11 +390,7 @@ class JobPersistence:
         run_ids = self.list_incomplete_run_ids(task_id)
         if self.resume_partial_repeats <= 1:
             return run_ids
-        return [
-            run_id
-            for run_id in run_ids
-            for _ in range(self.resume_partial_repeats)
-        ]
+        return [run_id for run_id in run_ids for _ in range(self.resume_partial_repeats)]
 
     def save_task_run(
         self,
@@ -363,6 +406,7 @@ class JobPersistence:
         trajectory_level: UptakeLevel | None = None,
         trajectory_labels: TrajectoryLabels | None = None,
         attack_analysis: AttackRelationAnalysis | None = None,
+        attack_chain_judgment: AttackChainJudgeAnalysis | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Save a single task run result and execution data.
@@ -410,7 +454,10 @@ class JobPersistence:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
         classification_method = self.job_config.trajectory_labeling.method
-        if trajectory_labels is None and classification_method != "attack_relation":
+        if trajectory_labels is None and classification_method not in {
+            "attack_relation",
+            "attack_chain_judge",
+        }:
             trajectory_labels = label_trajectory(
                 messages,
                 attacks=attacks_dict,
@@ -449,6 +496,9 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
             attack_analysis=attack_analysis.to_json() if attack_analysis else None,
+            attack_chain_judgment=(
+                attack_chain_judgment.to_json() if attack_chain_judgment else None
+            ),
         )
         self._save_execution_files(
             run_dir,
@@ -456,6 +506,9 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
             attack_analysis=attack_analysis.to_json() if attack_analysis else None,
+            attack_chain_judgment=(
+                attack_chain_judgment.to_json() if attack_chain_judgment else None
+            ),
         )
 
         # Update index
@@ -487,6 +540,7 @@ class JobPersistence:
         trajectory_level: UptakeLevel | None = None,
         trajectory_labels: TrajectoryLabels | None = None,
         attack_analysis: AttackRelationAnalysis | None = None,
+        attack_chain_judgment: AttackChainJudgeAnalysis | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Save a task couple run result and execution data.
@@ -539,7 +593,10 @@ class JobPersistence:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
         classification_method = self.job_config.trajectory_labeling.method
-        if trajectory_labels is None and classification_method != "attack_relation":
+        if trajectory_labels is None and classification_method not in {
+            "attack_relation",
+            "attack_chain_judge",
+        }:
             trajectory_labels = label_trajectory(
                 messages,
                 attacks=attacks_dict,
@@ -578,6 +635,9 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
             attack_analysis=attack_analysis.to_json() if attack_analysis else None,
+            attack_chain_judgment=(
+                attack_chain_judgment.to_json() if attack_chain_judgment else None
+            ),
         )
         self._save_execution_files(
             run_dir,
@@ -585,6 +645,9 @@ class JobPersistence:
             attacks=attacks_dict,
             trajectory_labels=trajectory_labels.to_json() if trajectory_labels else None,
             attack_analysis=attack_analysis.to_json() if attack_analysis else None,
+            attack_chain_judgment=(
+                attack_chain_judgment.to_json() if attack_chain_judgment else None
+            ),
         )
 
         # Update index
@@ -683,11 +746,7 @@ class JobPersistence:
             result = TaskRunResult.model_validate_json(result_path.read_text())
         except (OSError, ValueError):
             return None
-        return (
-            result.trajectory_level
-            if result.trajectory_level in _TRAJECTORY_LEVELS
-            else None
-        )
+        return result.trajectory_level if result.trajectory_level in _TRAJECTORY_LEVELS else None
 
     def _write_asr_summary(self, entries: list[RunIndexEntry]) -> None:
         threshold = 1.0
@@ -719,9 +778,7 @@ class JobPersistence:
                 else:
                     level_runs[level].append(run_reference)
 
-            level_counts = {
-                level: len(level_runs[level]) for level in _TRAJECTORY_LEVELS
-            }
+            level_counts = {level: len(level_runs[level]) for level in _TRAJECTORY_LEVELS}
             return {
                 "asr": successes / len(valid) if valid else None,
                 "mean_attack_score": (
