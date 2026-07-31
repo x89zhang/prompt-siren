@@ -6,12 +6,16 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
 from pydantic_ai.messages import ModelMessage
 
-from .attack_relation_classification import build_attack_relation_analysis
+from .attack_relation_classification import (
+    build_attack_relation_analysis,
+    normalize_document,
+)
 from .trajectory_labeling import messages_to_dicts, serializable_attacks
 from .types import InjectionAttack
 
@@ -32,6 +36,16 @@ STRUCTURAL_STOP_WORDS = {
     "unit",
     "unknown",
 }
+
+
+@dataclass(frozen=True)
+class _RetrievalUnit:
+    """Minimal source-separated view used only for attack-chain retrieval."""
+
+    unit_type: str
+    raw_document: str
+    normalized_document: str
+    message_indices: list[int]
 
 
 def _canonical_text(text: str) -> str:
@@ -69,6 +83,38 @@ def _payload_exposure_indices(
     return sorted(indices)
 
 
+def _source_separated_retrieval_units(
+    analysis: Any,
+) -> list[Any]:
+    """Embed assistant thought and each tool call independently."""
+    source_events = getattr(analysis, "source_events", None)
+    if not isinstance(source_events, list):
+        return list(analysis.units)
+
+    units = [unit for unit in analysis.units if unit.unit_type != "agent_message"]
+    for event in source_events:
+        if event.source_type == "assistant-intent":
+            source = "assistant-text"
+        elif event.source_type == "assistant-action":
+            source = "tool-call:" + (event.tool_name or "unknown")
+        else:
+            continue
+        raw_document = (
+            "[UNIT=AGENT_MESSAGE]\n"
+            f"[SOURCE={source} part_index={event.part_index}]\n"
+            f"{event.content}"
+        )
+        units.append(
+            _RetrievalUnit(
+                unit_type="agent_message",
+                raw_document=raw_document,
+                normalized_document=normalize_document(raw_document),
+                message_indices=[event.message_index],
+            )
+        )
+    return units
+
+
 def _nested_strings(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -77,6 +123,54 @@ def _nested_strings(value: Any) -> list[str]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [text for nested in value for text in _nested_strings(nested)]
     return []
+
+
+def _message_payload_flags(
+    messages: Sequence[ModelMessage | dict[str, Any]],
+    canonical_payloads: Sequence[str],
+) -> dict[int, bool]:
+    """Report which complete messages contain a full verbatim payload."""
+    flags: dict[int, bool] = {}
+    for message_index, message in enumerate(messages_to_dicts(messages)):
+        values = [
+            text
+            for part in message.get("parts", [])
+            if isinstance(part, dict)
+            for value in (part.get("content"), part.get("args"))
+            for text in _nested_strings(value)
+        ]
+        canonical_values = [_canonical_text(value) for value in values]
+        flags[message_index] = any(
+            payload in value for payload in canonical_payloads for value in canonical_values
+        )
+    return flags
+
+
+def _paired_tool_return_indices(
+    messages: Sequence[ModelMessage | dict[str, Any]],
+    call_message_indices: set[int],
+) -> list[int]:
+    """Return tool results linked to any candidate assistant tool call."""
+    serialized_messages = messages_to_dicts(messages)
+    call_ids = {
+        str(part["tool_call_id"])
+        for message_index, message in enumerate(serialized_messages)
+        if message_index in call_message_indices
+        for part in message.get("parts", [])
+        if isinstance(part, dict)
+        and part.get("part_kind") == "tool-call"
+        and part.get("tool_call_id")
+    }
+    return sorted(
+        {
+            message_index
+            for message_index, message in enumerate(serialized_messages)
+            for part in message.get("parts", [])
+            if isinstance(part, dict)
+            and part.get("part_kind") in {"tool-return", "injectable-tool-return"}
+            and str(part.get("tool_call_id") or "") in call_ids
+        }
+    )
 
 
 def _payload_command_fragments(payloads: Sequence[str]) -> set[str]:
@@ -198,6 +292,7 @@ def retrieve_attack_chain_candidates(
         attacks=attacks,
         include_attack_context_in_documents=False,
     )
+    retrieval_units = _source_separated_retrieval_units(analysis)
     grouped_units: dict[str, list[Any]] = defaultdict(list)
     canonical_payloads = [
         canonical
@@ -205,10 +300,17 @@ def retrieve_attack_chain_candidates(
         if len(canonical := _canonical_text(payload)) >= VERBATIM_PAYLOAD_MIN_CHARS
     ]
     excluded_verbatim_units = 0
-    for unit in analysis.units:
+    payload_message_flags = _message_payload_flags(messages, canonical_payloads)
+    verbatim_neighbor_indices: set[int] = set()
+    for unit in retrieval_units:
         canonical_document = _canonical_text(_behavior_document(unit.raw_document))
         if any(payload in canonical_document for payload in canonical_payloads):
             excluded_verbatim_units += 1
+            verbatim_neighbor_indices.update(
+                message_index
+                for message_index in unit.message_indices
+                if not payload_message_flags.get(message_index, False)
+            )
             continue
         grouped_units[unit.unit_type].append(unit)
 
@@ -340,6 +442,12 @@ def retrieve_attack_chain_candidates(
     selected_message_indices.update(exposure_indices)
     selected_message_indices.update(matching_tool_call_indices)
     selected_message_indices.update(paired_tool_return_indices)
+    selected_message_indices.update(verbatim_neighbor_indices)
+    candidate_paired_return_indices = _paired_tool_return_indices(
+        messages,
+        selected_message_indices,
+    )
+    selected_message_indices.update(candidate_paired_return_indices)
     return {
         "status": "fitted",
         "method": "single_trajectory_bertopic_payload_retrieval",
@@ -351,9 +459,12 @@ def retrieve_attack_chain_candidates(
         "top_units_per_group": max(0, top_units_per_group),
         "min_topic_size": max(2, min_topic_size),
         "verbatim_payload_units_excluded": excluded_verbatim_units,
+        "agent_embedding_views": "assistant_text_and_tool_call_separate",
         "groups": groups,
         "payload_exposure_message_indices": exposure_indices,
+        "verbatim_payload_neighbor_message_indices": sorted(verbatim_neighbor_indices),
         "payload_matching_tool_call_message_indices": matching_tool_call_indices,
         "paired_tool_return_message_indices": paired_tool_return_indices,
+        "candidate_paired_tool_return_message_indices": candidate_paired_return_indices,
         "candidate_message_indices": sorted(selected_message_indices),
     }
