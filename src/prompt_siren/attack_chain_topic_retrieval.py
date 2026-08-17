@@ -86,12 +86,17 @@ def _payload_exposure_indices(
 def _source_separated_retrieval_units(
     analysis: Any,
 ) -> list[Any]:
-    """Embed assistant thought and each tool call independently."""
+    """Embed source-separated messages, but never semantic transition units."""
     source_events = getattr(analysis, "source_events", None)
+    non_transition_units = [
+        unit
+        for unit in analysis.units
+        if unit.unit_type != "observation_to_agent_transition"
+    ]
     if not isinstance(source_events, list):
-        return list(analysis.units)
+        return non_transition_units
 
-    units = [unit for unit in analysis.units if unit.unit_type != "agent_message"]
+    units = [unit for unit in non_transition_units if unit.unit_type != "agent_message"]
     for event in source_events:
         if event.source_type == "assistant-intent":
             source = "assistant-text"
@@ -113,6 +118,42 @@ def _source_separated_retrieval_units(
             )
         )
     return units
+
+
+def _deterministic_next_assistant_indices(
+    messages: Sequence[ModelMessage | dict[str, Any]],
+    source_message_indices: set[int],
+) -> list[int]:
+    """Return the next assistant message after each selected observation/exposure."""
+    serialized_messages = messages_to_dicts(messages)
+    selected: set[int] = set()
+    for source_index in source_message_indices:
+        for message_index in range(source_index + 1, len(serialized_messages)):
+            message = serialized_messages[message_index]
+            if message.get("kind") != "response":
+                continue
+            if any(
+                isinstance(part, dict)
+                and part.get("part_kind") in {"text", "tool-call"}
+                for part in message.get("parts", [])
+            ):
+                selected.add(message_index)
+                break
+    return sorted(selected)
+
+
+def _tool_return_message_indices(
+    messages: Sequence[ModelMessage | dict[str, Any]],
+) -> set[int]:
+    return {
+        message_index
+        for message_index, message in enumerate(messages_to_dicts(messages))
+        if any(
+            isinstance(part, dict)
+            and part.get("part_kind") in {"tool-return", "injectable-tool-return"}
+            for part in message.get("parts", [])
+        )
+    }
 
 
 def _nested_strings(value: Any) -> list[str]:
@@ -443,6 +484,16 @@ def retrieve_attack_chain_candidates(
     selected_message_indices.update(matching_tool_call_indices)
     selected_message_indices.update(paired_tool_return_indices)
     selected_message_indices.update(verbatim_neighbor_indices)
+    selected_observation_indices = (
+        selected_message_indices & _tool_return_message_indices(messages)
+    )
+    deterministic_transition_neighbor_indices = _deterministic_next_assistant_indices(
+        messages,
+        set(exposure_indices)
+        | selected_observation_indices
+        | set(paired_tool_return_indices),
+    )
+    selected_message_indices.update(deterministic_transition_neighbor_indices)
     candidate_paired_return_indices = _paired_tool_return_indices(
         messages,
         selected_message_indices,
@@ -460,9 +511,13 @@ def retrieve_attack_chain_candidates(
         "min_topic_size": max(2, min_topic_size),
         "verbatim_payload_units_excluded": excluded_verbatim_units,
         "agent_embedding_views": "assistant_text_and_tool_call_separate",
+        "transition_semantic_retrieval": False,
         "groups": groups,
         "payload_exposure_message_indices": exposure_indices,
         "verbatim_payload_neighbor_message_indices": sorted(verbatim_neighbor_indices),
+        "deterministic_transition_neighbor_message_indices": (
+            deterministic_transition_neighbor_indices
+        ),
         "payload_matching_tool_call_message_indices": matching_tool_call_indices,
         "paired_tool_return_message_indices": paired_tool_return_indices,
         "candidate_paired_tool_return_message_indices": candidate_paired_return_indices,
