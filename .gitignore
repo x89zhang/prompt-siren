@@ -44,3 +44,4 @@ open_coding/
 *.out
 *.sh
 docs/labeling
+tests/

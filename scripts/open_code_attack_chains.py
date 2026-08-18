@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from prompt_siren.attack_chain_open_coding import (
+    ATTACK_IRRELEVANT_CODE_ID,
     backcode_units,
     build_coding_clusters,
     cluster_memos,
     collect_open_coding_units,
     DEFAULT_RESEARCH_QUESTION,
+    ensure_attack_irrelevant_code,
     find_chain_sources,
     generate_atomic_memos,
     generate_incremental_codebook,
@@ -172,9 +174,18 @@ async def async_main() -> None:
     manifest_path = output_dir / "open_coding_manifest.json"
 
     existing_memos = {
-        unit["unit_id"]: unit["memo"]
+        unit["unit_id"]: {
+            "memo": unit["memo"],
+            "attack_relevance": unit["attack_relevance"],
+            "relevance_rationale": unit["relevance_rationale"],
+        }
         for unit in (_load_jsonl(units_path) if args.resume else [])
-        if isinstance(unit.get("unit_id"), str) and isinstance(unit.get("memo"), str)
+        if (
+            isinstance(unit.get("unit_id"), str)
+            and isinstance(unit.get("memo"), str)
+            and unit.get("attack_relevance") in {"attack-relevant", "attack-irrelevant"}
+            and isinstance(unit.get("relevance_rationale"), str)
+        )
     }
     model = infer_model(args.model)
     model_settings = _model_settings(args.model, max(1, args.max_output_tokens))
@@ -217,11 +228,19 @@ async def async_main() -> None:
         representative_units=max(1, args.representative_units),
         max_attempts=max(1, args.max_attempts),
     )
+    codebook = ensure_attack_irrelevant_code(codebook)
+    seed_inductive_code_count = sum(
+        code.get("code_id") != ATTACK_IRRELEVANT_CODE_ID for code in seed_codebook
+    )
+    inductive_code_count = sum(
+        code.get("code_id") != ATTACK_IRRELEVANT_CODE_ID for code in codebook
+    )
     _write_json(codebook_path, {"codes": codebook})
     _write_jsonl(decisions_path, decisions)
     print(
         f"created: {codebook_path} ({len(codebook)} codes; "
-        f"{len(seed_codebook)} seeded, {len(codebook) - len(seed_codebook)} new)"
+        f"{seed_inductive_code_count} seeded, "
+        f"{inductive_code_count - seed_inductive_code_count} new, 1 reserved)"
     )
 
     assignments = await backcode_units(
@@ -253,16 +272,25 @@ async def async_main() -> None:
     )
     manifest = {
         "method": "gatos_inspired_attack_chain_open_coding_v1",
+        "attack_relevance_gate": "llm_memo_v1",
         "research_question": args.research_question,
         "model": args.model,
         "embedding_model": args.embedding_model,
         "random_seed": args.random_seed,
         "source_chain_count": len(sources),
         "unit_count": len(units),
+        "attack_relevant_unit_count": sum(
+            unit.get("attack_relevance") != "attack-irrelevant" for unit in units
+        ),
+        "attack_irrelevant_unit_count": sum(
+            unit.get("attack_relevance") == "attack-irrelevant" for unit in units
+        ),
         "cluster_count": len(clusters),
         "seed_codebook": str(seed_codebook_path) if seed_codebook_path else None,
         "seed_code_count": len(seed_codebook),
-        "new_code_count": len(codebook) - len(seed_codebook),
+        "new_code_count": inductive_code_count - seed_inductive_code_count,
+        "inductive_code_count": inductive_code_count,
+        "reserved_code_ids": [ATTACK_IRRELEVANT_CODE_ID],
         "code_count": len(codebook),
         "theme_count": len(themes),
         "outputs": {
