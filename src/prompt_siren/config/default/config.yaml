@@ -44,13 +44,15 @@ execution:
 # TRAJECTORY LABELING
 # =============================================================================
 trajectory_labeling:
-  method: hybrid # hybrid, judge_audit, attack_relation, or attack_chain_judge
+  method: hybrid # none, hybrid, judge_audit, attack_relation, or attack_chain_judge
   attack_relation_include_attack_context_in_documents: true # Include attack context in discovery documents
   attack_relation_schema_version: v1 # Unlabeled analysis-unit schema version
   attack_chain_judge_schema_version: v2 # BERTopic-retrieved chronological message-chain schema
   attack_chain_judge_model: null # Optional dedicated judge; null reuses the tested agent model
   attack_chain_judge_max_attempts: 3 # Retries for valid structured chain extraction
   attack_chain_judge_max_output_tokens: 4096 # Compact v2 message-selection output cap
+  attack_chain_judge_recall_priority: false # Over-inclusive open-coding prompt; false keeps the compact default
+  attack_chain_judge_semantic_precision: false # Slightly tighter causal prompt for judges such as Luna
   attack_chain_judge_top_topics_per_group: 3 # Payload-nearest topics retained per unit group
   attack_chain_judge_top_units_per_group: 3 # Individual and topic=-1 recall safety net
   attack_chain_judge_min_topic_size: 3 # Single-trajectory BERTopic minimum cluster size

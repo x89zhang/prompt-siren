@@ -248,6 +248,7 @@ async def _label_trajectory_for_result(
         return None
 
     if persistence.job_config.trajectory_labeling.method in {
+        "none",
         "attack_relation",
         "attack_chain_judge",
     }:
@@ -404,6 +405,8 @@ async def _judge_attack_chain_for_result(
             max_attempts=config.attack_chain_judge_max_attempts,
             candidate_message_indices=candidate_message_indices,
             topic_retrieval=topic_retrieval,
+            recall_priority=config.attack_chain_judge_recall_priority,
+            semantic_precision=config.attack_chain_judge_semantic_precision,
         )
     except Exception as exc:
         # Trajectory labeling is auxiliary analysis. A provider/configuration

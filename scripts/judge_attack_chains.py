@@ -16,6 +16,7 @@ from prompt_siren.job.models import (
     TASK_ATTACK_CHAIN_JUDGE_MARKDOWN_FILENAME,
     TASK_EXECUTION_FILENAME,
     TASK_EXECUTION_METADATA_FILENAME,
+    TASK_RESULT_FILENAME,
 )
 from prompt_siren.providers import infer_model
 
@@ -47,7 +48,16 @@ def execution_attacks(execution_path: Path, execution: dict[str, Any]) -> Any:
         metadata = load_json(metadata_path)
         if metadata.get("attacks") is not None:
             return metadata["attacks"]
-    return execution.get("attacks")
+    attacks = execution.get("attacks")
+    if attacks is not None:
+        return attacks
+
+    result_path = execution_path.with_name(TASK_RESULT_FILENAME)
+    if result_path.exists():
+        result = load_json(result_path)
+        if result.get("attacks") is not None:
+            return result["attacks"]
+    return None
 
 
 def dump_text_atomic(path: Path, text: str) -> None:
@@ -69,6 +79,8 @@ async def extract_execution(
     min_topic_size: int = 3,
     embedding_model_name: str = "all-MiniLM-L6-v2",
     max_output_tokens: int = 4096,
+    recall_priority: bool = False,
+    semantic_precision: bool = False,
 ) -> tuple[ExtractionStatus, str]:
     json_path = execution_path.with_name(TASK_ATTACK_CHAIN_JUDGE_FILENAME)
     markdown_path = execution_path.with_name(TASK_ATTACK_CHAIN_JUDGE_MARKDOWN_FILENAME)
@@ -115,6 +127,8 @@ async def extract_execution(
             max_attempts=max_attempts,
             candidate_message_indices=candidate_message_indices,
             topic_retrieval=topic_retrieval,
+            recall_priority=recall_priority,
+            semantic_precision=semantic_precision,
         )
         payload = {
             key: execution.get(key)
@@ -158,6 +172,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-topic-size", type=int, default=3)
     parser.add_argument("--embedding-model", default="all-MiniLM-L6-v2")
     parser.add_argument("--max-output-tokens", type=int, default=4096)
+    judge_mode = parser.add_mutually_exclusive_group()
+    judge_mode.add_argument(
+        "--recall-priority",
+        action="store_true",
+        help=(
+            "Use the over-inclusive open-coding prompt with per-evidence role allowlists; "
+            "the current compact mode remains the default."
+        ),
+    )
+    judge_mode.add_argument(
+        "--semantic-precision",
+        action="store_true",
+        help="Use a slightly tighter causal prompt and action-only tool expansion.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -187,6 +215,8 @@ async def async_main() -> None:
             min_topic_size=max(2, args.min_topic_size),
             embedding_model_name=args.embedding_model,
             max_output_tokens=max(1, args.max_output_tokens),
+            recall_priority=args.recall_priority,
+            semantic_precision=args.semantic_precision,
         )
         counts[status] += 1
         print(f"{status}: {execution_path} ({detail})")

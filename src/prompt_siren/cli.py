@@ -113,6 +113,16 @@ _start_common_options = [
         "--multirun", is_flag=True, help="Enable Hydra multirun mode for parameter sweeps"
     ),
     click.option(
+        "--recall-priority",
+        is_flag=True,
+        help="Use recall-priority attack-chain extraction during task execution.",
+    ),
+    click.option(
+        "--semantic-precision",
+        is_flag=True,
+        help="Use slightly tighter semantic attack-chain extraction during task execution.",
+    ),
+    click.option(
         "--cfg",
         "--print-config",
         type=click.Choice(["job", "hydra", "all"]),
@@ -146,6 +156,33 @@ def _add_options(options: list[Callable[[_F], _F]]) -> Callable[[_F], _F]:
     return decorator
 
 
+def _task_run_overrides(
+    overrides: tuple[str, ...],
+    *,
+    recall_priority: bool,
+    semantic_precision: bool,
+) -> list[str]:
+    """Translate task-run convenience flags into Hydra overrides."""
+    if recall_priority and semantic_precision:
+        raise click.UsageError(
+            "--recall-priority and --semantic-precision are mutually exclusive"
+        )
+    values = list(overrides)
+    if not recall_priority and not semantic_precision:
+        return values
+    recall_key = "trajectory_labeling.attack_chain_judge_recall_priority"
+    precision_key = "trajectory_labeling.attack_chain_judge_semantic_precision"
+    values = [
+        value
+        for value in values
+        if not value.startswith(f"{recall_key}=")
+        and not value.startswith(f"{precision_key}=")
+    ]
+    if recall_priority:
+        return [*values, f"{recall_key}=true", f"{precision_key}=false"]
+    return [*values, f"{recall_key}=false", f"{precision_key}=true"]
+
+
 @start.command(name="benign")
 @_add_options(_start_common_options)
 def start_benign(
@@ -154,6 +191,8 @@ def start_benign(
     job_name: str | None,
     jobs_dir: Path,
     multirun: bool,
+    recall_priority: bool,
+    semantic_precision: bool,
     cfg: str | None,
     resolve: bool,
     info: str | None,
@@ -169,7 +208,11 @@ def start_benign(
     _run_job(
         config_dir=config_dir,
         config_name=config_name,
-        overrides=list(overrides),
+        overrides=_task_run_overrides(
+            overrides,
+            recall_priority=recall_priority,
+            semantic_precision=semantic_precision,
+        ),
         execution_mode="benign",
         job_name=job_name,
         jobs_dir=jobs_dir,
@@ -188,6 +231,8 @@ def start_attack(
     job_name: str | None,
     jobs_dir: Path,
     multirun: bool,
+    recall_priority: bool,
+    semantic_precision: bool,
     cfg: str | None,
     resolve: bool,
     info: str | None,
@@ -204,7 +249,11 @@ def start_attack(
     _run_job(
         config_dir=config_dir,
         config_name=config_name,
-        overrides=list(overrides),
+        overrides=_task_run_overrides(
+            overrides,
+            recall_priority=recall_priority,
+            semantic_precision=semantic_precision,
+        ),
         execution_mode="attack",
         job_name=job_name,
         jobs_dir=jobs_dir,

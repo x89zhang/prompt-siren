@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from pydantic_ai.usage import UsageLimits
 
 
@@ -54,10 +54,13 @@ class ExecutionConfig(BaseModel):
 class TrajectoryLabelingConfig(BaseModel):
     """Configuration for trajectory uptake labeling."""
 
-    method: Literal["hybrid", "judge_audit", "attack_relation", "attack_chain_judge"] = Field(
+    method: Literal[
+        "none", "hybrid", "judge_audit", "attack_relation", "attack_chain_judge"
+    ] = Field(
         default="hybrid",
         description=(
-            "Automatic trajectory labeling method. 'hybrid' uses rules plus old-path "
+            "Automatic trajectory labeling method. 'none' disables trajectory labeling; "
+            "'hybrid' uses rules plus old-path "
             "L2/L3 semantic judges; 'judge_audit' first uses an LLM relevance filter, "
             "then applies hybrid labeling to attack-related messages; 'attack_relation' "
             "exports unlabeled agent, observation, and transition units for bottom-up "
@@ -99,6 +102,32 @@ class TrajectoryLabelingConfig(BaseModel):
         ge=1,
         description="Maximum output tokens for the attack-message selection judge.",
     )
+    attack_chain_judge_recall_priority: bool = Field(
+        default=False,
+        description=(
+            "Use the over-inclusive open-coding attack-chain prompt with per-evidence "
+            "role allowlists."
+        ),
+    )
+    attack_chain_judge_semantic_precision: bool = Field(
+        default=False,
+        description=(
+            "Use a slightly tighter causal attack-chain prompt and action-only "
+            "tool-call expansion."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_attack_chain_judge_mode(self) -> TrajectoryLabelingConfig:
+        if (
+            self.attack_chain_judge_recall_priority
+            and self.attack_chain_judge_semantic_precision
+        ):
+            raise ValueError(
+                "attack_chain_judge_recall_priority and "
+                "attack_chain_judge_semantic_precision are mutually exclusive"
+            )
+        return self
     attack_chain_judge_top_topics_per_group: int = Field(
         default=3,
         ge=1,

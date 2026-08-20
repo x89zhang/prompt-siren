@@ -453,8 +453,10 @@ class JobPersistence:
         if generated_attacks:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
-        classification_method = self.job_config.trajectory_labeling.method
-        if trajectory_labels is None and classification_method not in {
+        labeling_method = self.job_config.trajectory_labeling.method
+        classification_method = None if labeling_method == "none" else labeling_method
+        if trajectory_labels is None and labeling_method not in {
+            "none",
             "attack_relation",
             "attack_chain_judge",
         }:
@@ -592,8 +594,10 @@ class JobPersistence:
         if generated_attacks:
             attacks_dict = InjectionAttacksDictTypeAdapter.dump_python(dict(generated_attacks))
 
-        classification_method = self.job_config.trajectory_labeling.method
-        if trajectory_labels is None and classification_method not in {
+        labeling_method = self.job_config.trajectory_labeling.method
+        classification_method = None if labeling_method == "none" else labeling_method
+        if trajectory_labels is None and labeling_method not in {
+            "none",
             "attack_relation",
             "attack_chain_judge",
         }:
